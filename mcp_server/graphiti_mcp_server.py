@@ -723,12 +723,68 @@ def format_fact_result(edge: EntityEdge) -> dict[str, Any]:
     )
 
 
+class EpisodeStatus:
+    """Track episode processing status."""
+    def __init__(self, name: str, uuid: str | None = None):
+        self.name = name
+        self.uuid = uuid or str(uuid.uuid4())
+        self.queued_at = datetime.now(timezone.utc)
+        self.started_at: Optional[datetime] = None
+        self.completed_at: Optional[datetime] = None
+        self.status = "queued"  # queued, processing, completed, failed
+        self.error: Optional[str] = None
+        self.group_id: Optional[str] = None
+        self.duration: Optional[float] = None
+        self.retries: int = 0
+
 # Dictionary to store queues for each group_id
 # Each queue is a list of tasks to be processed sequentially
 episode_queues: dict[str, asyncio.Queue] = {}
+
 # Dictionary to track if a worker is running for each group_id
 queue_workers: dict[str, bool] = {}
 
+# Dictionary to track episode processing status
+episode_statuses: dict[str, EpisodeStatus] = {}
+
+
+async def verify_neo4j_connection(client: Graphiti) -> bool:
+    """Verify Neo4j connection is working.
+    
+    Args:
+        client: Graphiti client instance
+        
+    Returns:
+        True if connection is working, False otherwise
+    """
+    try:
+        async with asyncio.timeout(5):
+            await client.driver.verify_connectivity()
+            logger.info("Neo4j connection verified")
+            return True
+    except Exception as e:
+        logger.error(
+            f"Neo4j connection failed",
+            extra={
+                'error': str(e),
+                'error_type': e.__class__.__name__
+            }
+        )
+        return False
+
+async def ensure_queue_worker(group_id: str):
+    """Ensure a queue worker is running for the group.
+    
+    Args:
+        group_id: Group ID to check worker for
+    """
+    if not queue_workers.get(group_id, False):
+        # Worker not running, start it
+        asyncio.create_task(process_episode_queue(group_id))
+        logger.info(
+            f"Started new queue worker",
+            extra={'group_id': group_id}
+        )
 
 class EpisodeProcessingError(RetryableError):
     """Error processing an episode that may be retryable."""
@@ -780,73 +836,115 @@ async def process_episode_queue(group_id: str):
             try:
                 start_time = time.time()
                 
+                # Get episode status from process function
+                status = process_func.episode_status
+                if status:
+                    status.started_at = datetime.now(timezone.utc)
+                    status.status = "processing"
+                    status.group_id = group_id
+                
                 # Process the episode with timeout
                 try:
                     async with asyncio.timeout(config.episode_timeout):
                         await process_func()
                 except asyncio.TimeoutError:
+                    if status:
+                        status.status = "failed"
+                        status.error = "Episode processing timed out"
                     raise EpisodeProcessingError("Episode processing timed out")
                 
                 # Log processing time
                 duration = time.time() - start_time
+                if status:
+                    status.completed_at = datetime.now(timezone.utc)
+                    status.status = "completed"
+                    status.duration = duration
+                
                 logger.info(
                     f'Episode processed successfully',
                     extra={
                         'group_id': group_id,
                         'duration': f'{duration:.3f}s',
-                        'queue_size': queue_size
+                        'queue_size': queue_size,
+                        'uuid': status.uuid if status else None
                     }
                 )
                 
             except (ServiceUnavailable, SessionExpired) as e:
                 # Database connection issues - retryable
+                error_msg = f"Database error: {str(e)}"
+                if status:
+                    status.error = error_msg
+                    status.status = "failed"
+                    status.retries += 1
                 logger.warning(
                     f'Database error processing episode',
                     extra={
                         'group_id': group_id,
                         'error': str(e),
-                        'error_type': e.__class__.__name__
+                        'error_type': e.__class__.__name__,
+                        'uuid': status.uuid if status else None,
+                        'retries': status.retries if status else 0
                     }
                 )
-                raise EpisodeProcessingError(f"Database error: {str(e)}") from e
+                raise EpisodeProcessingError(error_msg) from e
                 
             except (APIError, APITimeoutError, RateLimitError) as e:
                 # LLM service issues - retryable
+                error_msg = f"LLM service error: {str(e)}"
+                if status:
+                    status.error = error_msg
+                    status.status = "failed"
+                    status.retries += 1
                 logger.warning(
                     f'LLM service error processing episode',
                     extra={
                         'group_id': group_id,
                         'error': str(e),
-                        'error_type': e.__class__.__name__
+                        'error_type': e.__class__.__name__,
+                        'uuid': status.uuid if status else None,
+                        'retries': status.retries if status else 0
                     }
                 )
-                raise EpisodeProcessingError(f"LLM service error: {str(e)}") from e
+                raise EpisodeProcessingError(error_msg) from e
                 
             except ValueError as e:
                 # Validation errors - not retryable
+                error_msg = f"Validation error: {str(e)}"
+                if status:
+                    status.error = error_msg
+                    status.status = "failed"
                 logger.error(
                     f'Validation error processing episode',
                     extra={
                         'group_id': group_id,
                         'error': str(e),
-                        'error_type': e.__class__.__name__
+                        'error_type': e.__class__.__name__,
+                        'uuid': status.uuid if status else None
                     }
                 )
                 # Don't retry validation errors
                 
             except Exception as e:
                 # Unexpected errors - log with full context
+                error_msg = f"Unexpected error: {str(e)}"
+                if status:
+                    status.error = error_msg
+                    status.status = "failed"
+                    status.retries += 1
                 logger.error(
                     f'Unexpected error processing episode',
                     extra={
                         'group_id': group_id,
                         'error': str(e),
-                        'error_type': e.__class__.__name__
+                        'error_type': e.__class__.__name__,
+                        'uuid': status.uuid if status else None,
+                        'retries': status.retries if status else 0
                     },
                     exc_info=True
                 )
                 # Treat unexpected errors as retryable
-                raise EpisodeProcessingError(f"Unexpected error: {str(e)}") from e
+                raise EpisodeProcessingError(error_msg) from e
                 
             finally:
                 # Mark the task as done regardless of success/failure
@@ -1090,6 +1188,10 @@ async def add_episode(
         # Use cast to help the type checker understand that graphiti_client is not None
         client = cast(Graphiti, graphiti_client)
 
+        # Create episode status
+        status = EpisodeStatus(name=name, uuid=uuid)
+        episode_statuses[status.uuid] = status
+        
         # Define the episode processing function with request tracking
         async def process_episode():
             try:
@@ -1098,12 +1200,16 @@ async def add_episode(
                     extra={
                         'request_id': request_id,
                         'name': name,
-                        'group_id': group_id_str
+                        'group_id': group_id_str,
+                        'uuid': status.uuid
                     }
                 )
                 
                 # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
                 entity_types = ENTITY_TYPES if config.use_custom_entities else {}
+                
+                # Attach status to function for tracking
+                process_episode.episode_status = status
 
                 # Process with timeout
                 async with asyncio.timeout(config.episode_timeout):
@@ -2238,6 +2344,75 @@ async def add_document(
             exc_info=True
         )
         return {'error': f'Error processing document: {error_msg}'}
+
+@mcp.tool()
+@with_logging()
+async def get_episode_status(uuid: str) -> dict[str, Any]:
+    """Get the status of an episode.
+    
+    Args:
+        uuid: UUID of the episode to check
+        
+    Returns:
+        Dictionary containing episode status information
+    """
+    if uuid not in episode_statuses:
+        return {
+            'error': f'Episode {uuid} not found'
+        }
+    
+    status = episode_statuses[uuid]
+    return {
+        'name': status.name,
+        'uuid': status.uuid,
+        'status': status.status,
+        'queued_at': status.queued_at.isoformat(),
+        'started_at': status.started_at.isoformat() if status.started_at else None,
+        'completed_at': status.completed_at.isoformat() if status.completed_at else None,
+        'error': status.error,
+        'group_id': status.group_id,
+        'duration': f"{status.duration:.3f}s" if status.duration is not None else None,
+        'retries': status.retries
+    }
+
+@mcp.tool()
+@with_logging()
+async def list_episodes(
+    group_id: str | None = None,
+    status: str | None = None,
+    limit: int = 10
+) -> dict[str, Any]:
+    """List episodes and their status.
+    
+    Args:
+        group_id: Optional group ID to filter by
+        status: Optional status to filter by (queued, processing, completed, failed)
+        limit: Maximum number of episodes to return
+        
+    Returns:
+        Dictionary containing list of episodes and their status
+    """
+    filtered = []
+    for episode in episode_statuses.values():
+        if group_id and episode.group_id != group_id:
+            continue
+        if status and episode.status != status:
+            continue
+        filtered.append({
+            'name': episode.name,
+            'uuid': episode.uuid,
+            'status': episode.status,
+            'queued_at': episode.queued_at.isoformat(),
+            'group_id': episode.group_id
+        })
+        
+        if len(filtered) >= limit:
+            break
+            
+    return {
+        'episodes': filtered,
+        'total': len(filtered)
+    }
 
 @with_retry(
     max_attempts=3,
