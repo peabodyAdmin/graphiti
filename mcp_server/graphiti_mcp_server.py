@@ -857,6 +857,94 @@ async def process_episode_queue(group_id: str):
         logger.info(f'Stopped episode queue worker for group_id: {group_id}')
 
 
+def format_episode_content(episode_body: str, source: str) -> str:
+    """Format episode content based on source type.
+    
+    Args:
+        episode_body: The raw content to format
+        source: The source type ('json', 'message', or 'text')
+        
+    Returns:
+        Formatted content string
+        
+    Raises:
+        EpisodeValidationError: If content is invalid or improperly formatted
+    """
+    if not episode_body or not episode_body.strip():
+        raise EpisodeValidationError("Episode body cannot be empty")
+
+    if source == 'json':
+        try:
+            # Parse and re-serialize to normalize JSON structure
+            data = json.loads(episode_body)
+            # Add additional JSON cleaning/formatting here
+            return json.dumps(data, ensure_ascii=False, sort_keys=True)
+        except json.JSONDecodeError as e:
+            raise EpisodeValidationError(f"Invalid JSON in episode_body: {str(e)}")
+            
+    elif source == 'message':
+        # Split into lines and normalize
+        lines = episode_body.splitlines()
+        formatted_lines = []
+        for line in lines:
+            line = line.strip()
+            if line:
+                # Validate and normalize message format
+                if not any(line.startswith(prefix + ":") for prefix in ['user', 'assistant']):
+                    raise EpisodeValidationError(
+                        "Message lines must start with 'user:' or 'assistant:'"
+                    )
+                # Normalize spacing after prefix
+                prefix, content = line.split(":", 1)
+                formatted_lines.append(f"{prefix}: {content.strip()}")
+        
+        if not formatted_lines:
+            raise EpisodeValidationError("Message content cannot be empty")
+            
+        return "\n".join(formatted_lines)
+        
+    else:  # text
+        # Normalize text content
+        lines = episode_body.splitlines()
+        # Remove empty lines and normalize whitespace
+        formatted_lines = [line.strip() for line in lines if line.strip()]
+        
+        if not formatted_lines:
+            raise EpisodeValidationError("Text content cannot be empty")
+            
+        return "\n".join(formatted_lines)
+
+def format_episode_name(name: str) -> str:
+    """Format and validate episode name.
+    
+    Args:
+        name: The raw episode name to format
+        
+    Returns:
+        Formatted episode name
+        
+    Raises:
+        EpisodeValidationError: If name is invalid
+    """
+    # Remove leading/trailing whitespace
+    name = name.strip()
+    
+    if not name:
+        raise EpisodeValidationError("Episode name cannot be empty")
+        
+    # Validate length
+    if len(name) > 200:  # arbitrary limit
+        raise EpisodeValidationError("Episode name too long (max 200 characters)")
+        
+    # Validate character set - allow Unicode but no control characters
+    if any(ord(c) < 32 or ord(c) == 127 for c in name):
+        raise EpisodeValidationError("Episode name cannot contain control characters")
+        
+    # Normalize whitespace
+    name = " ".join(name.split())
+    
+    return name
+
 @mcp.tool()
 @with_logging(truncate_length=2000)  # Truncate long episode bodies in logs
 async def add_episode(
@@ -945,13 +1033,9 @@ async def add_episode(
         return {'error': 'Graphiti client not initialized'}
 
     try:
-        # Input validation
-        if not name or not name.strip():
-            raise EpisodeValidationError("Episode name cannot be empty")
+        # Format and validate name
+        name = format_episode_name(name)
         
-        if not episode_body or not episode_body.strip():
-            raise EpisodeValidationError("Episode body cannot be empty")
-            
         # Validate source type
         source = source.lower()
         if source not in ('text', 'json', 'message'):
@@ -959,18 +1043,15 @@ async def add_episode(
                 f"Invalid source type '{source}'. Must be one of: text, json, message"
             )
 
+        # Format and validate content
+        episode_body = format_episode_content(episode_body, source)
+
         # Map string source to EpisodeType enum
         source_type = EpisodeType.text
         if source == 'message':
             source_type = EpisodeType.message
         elif source == 'json':
             source_type = EpisodeType.json
-            # Validate JSON if source type is json
-            try:
-                import json
-                json.loads(episode_body)
-            except json.JSONDecodeError as e:
-                raise EpisodeValidationError(f"Invalid JSON in episode_body: {str(e)}")
 
         # Use the provided group_id or fall back to the default from config
         effective_group_id = group_id if group_id is not None else config.group_id
