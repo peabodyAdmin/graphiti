@@ -30,6 +30,7 @@ from .utils import (
     with_logging,
     with_retry,
 )
+from .document_processor import DocumentChunker, DocumentProcessor
 
 from graphiti_core import Graphiti
 from graphiti_core.cross_encoder.client import CrossEncoderClient
@@ -489,11 +490,33 @@ class MCPConfig(BaseModel):
     """Configuration for MCP server."""
 
     transport: str = 'sse'  # Default to SSE transport
+    
+    # Operation timeouts in seconds
+    episode_timeout: int = 120  # 2 minutes default for episode processing
+    search_timeout: int = 30    # 30 seconds for search operations
+    delete_timeout: int = 30    # 30 seconds for delete operations
+    clear_timeout: int = 300    # 5 minutes for graph clear
+    connect_timeout: int = 10   # 10 seconds for connection checks
+    
+    # Document processing settings
+    max_chunk_size: int = 1000  # Maximum characters per chunk
+    chunk_overlap: int = 100    # Overlap between chunks to maintain context
+    max_parallel_chunks: int = 5  # Maximum chunks to process in parallel
 
     @classmethod
     def from_cli(cls, args: argparse.Namespace) -> 'MCPConfig':
         """Create MCP configuration from CLI arguments."""
-        return cls(transport=args.transport)
+        return cls(
+            transport=args.transport,
+            episode_timeout=args.episode_timeout,
+            search_timeout=args.search_timeout,
+            delete_timeout=args.delete_timeout,
+            clear_timeout=args.clear_timeout,
+            connect_timeout=args.connect_timeout,
+            max_chunk_size=args.max_chunk_size,
+            chunk_overlap=args.chunk_overlap,
+            max_parallel_chunks=args.max_parallel_chunks,
+        )
 
 
 # Configure logging
@@ -759,7 +782,7 @@ async def process_episode_queue(group_id: str):
                 
                 # Process the episode with timeout
                 try:
-                    async with asyncio.timeout(30):  # 30 second timeout
+                    async with asyncio.timeout(config.episode_timeout):
                         await process_func()
                 except asyncio.TimeoutError:
                     raise EpisodeProcessingError("Episode processing timed out")
@@ -1083,7 +1106,7 @@ async def add_episode(
                 entity_types = ENTITY_TYPES if config.use_custom_entities else {}
 
                 # Process with timeout
-                async with asyncio.timeout(30):  # 30 second timeout
+                async with asyncio.timeout(config.episode_timeout):
                     await client.add_episode(
                         name=name,
                         episode_body=episode_body,
@@ -2130,6 +2153,92 @@ class ClearGraphError(RetryableError):
     pass
 
 @mcp.tool()
+@with_logging(truncate_length=2000)
+async def add_document(
+    name: str,
+    document: str,
+    group_id: str | None = None,
+    source_description: str = '',
+) -> SuccessResponse | ErrorResponse:
+    """Add a large document to the knowledge graph by splitting it into manageable chunks.
+    
+    The document is split into overlapping chunks to maintain context, and each chunk
+    is processed in parallel up to a maximum number of concurrent chunks.
+    
+    Args:
+        name: Base name for the document and its chunks
+        document: The document text to process
+        group_id: Optional group ID for organization
+        source_description: Optional description of the document source
+        
+    Returns:
+        Success or error response with details about processed chunks
+    """
+    global graphiti_client, config
+    
+    if graphiti_client is None:
+        return {'error': 'Graphiti client not initialized'}
+        
+    try:
+        # Create processor with current configuration
+        processor = DocumentProcessor(
+            chunker=DocumentChunker(
+                max_chunk_size=config.max_chunk_size,
+                chunk_overlap=config.chunk_overlap,
+            ),
+            episode_timeout=config.episode_timeout,
+        )
+        
+        # Create chunk processing function
+        async def process_chunk(name: str, text: str, group_id: Optional[str]):
+            return await add_episode(
+                name=name,
+                episode_body=text,
+                group_id=group_id,
+                source='text',
+                source_description=source_description,
+            )
+            
+        # Process document
+        successful, failed = await processor.process_document(
+            name=name,
+            text=document,
+            process_chunk_func=process_chunk,
+            group_id=group_id,
+        )
+        
+        # Generate response
+        total_chunks = successful + len(failed)
+        message = f"Processed {successful}/{total_chunks} chunks successfully"
+        
+        if failed:
+            message += f"\n{len(failed)} chunks failed:"
+            for f in failed[:3]:  # Show first 3 failures
+                pos = f['position']
+                error = f['error']
+                message += f"\n- Chunk at position {pos}: {error}"
+            if len(failed) > 3:
+                message += f"\n- ... and {len(failed) - 3} more failures"
+                
+        return {
+            'message': message,
+            'successful_chunks': successful,
+            'failed_chunks': failed,
+            'total_chunks': total_chunks
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(
+            f"Error processing document",
+            extra={
+                'error': error_msg,
+                'error_type': e.__class__.__name__
+            },
+            exc_info=True
+        )
+        return {'error': f'Error processing document: {error_msg}'}
+
 @with_retry(
     max_attempts=3,
     base_delay=2.0,
@@ -2391,6 +2500,26 @@ async def initialize_server() -> MCPConfig:
         '--use-custom-entities',
         action='store_true',
         help='Enable entity extraction using the predefined ENTITY_TYPES',
+    )
+    
+    # Add timeout configuration
+    parser.add_argument(
+        '--episode-timeout',
+        type=int,
+        default=120,
+        help='Timeout in seconds for episode processing (default: 120)',
+    )
+    parser.add_argument(
+        '--chunk-size',
+        type=int,
+        default=1000,
+        help='Maximum characters per chunk when processing large documents (default: 1000)',
+    )
+    parser.add_argument(
+        '--chunk-overlap',
+        type=int,
+        default=100,
+        help='Number of characters to overlap between chunks (default: 100)',
     )
 
     args = parser.parse_args()
