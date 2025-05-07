@@ -29,6 +29,7 @@ from graphiti_core.helpers import MAX_REFLEXION_ITERATIONS, semaphore_gather
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.llm_client.config import ModelSize
 from graphiti_core.nodes import CommunityNode, EntityNode, EpisodicNode
+from graphiti_core.context import Node  # Add import for pending nodes
 from graphiti_core.prompts import prompt_library
 from graphiti_core.prompts.dedupe_edges import EdgeDuplicate, UniqueFacts
 from graphiti_core.prompts.extract_edges import ExtractedEdges, MissingFacts
@@ -83,7 +84,7 @@ def build_community_edges(
 async def extract_edges(
     clients: GraphitiClients,
     episode: EpisodicNode,
-    nodes: list[EntityNode],
+    nodes: list[EntityNode | Node],  # Allow both EntityNode and pending Node
     previous_episodes: list[EpisodicNode],
     group_id: str = '',
 ) -> list[EntityEdge]:

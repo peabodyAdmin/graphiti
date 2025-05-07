@@ -356,12 +356,26 @@ class Graphiti:
                 )
             )
 
+            # Create graph context for tracking state
+            from .context import GraphContext, Node, Edge
+            ctx = GraphContext()
+            
             # Extract entities as nodes
-
             extracted_nodes = await extract_nodes(
                 self.clients, episode, previous_episodes, entity_types
             )
-
+            
+            # Add extracted nodes to context
+            for node in extracted_nodes:
+                ctx.add_node(Node(
+                    uuid=node.uuid,
+                    name=node.name,
+                    labels=node.labels,
+                    attributes=node.attributes,
+                    created_at=now,
+                    group_id=group_id
+                ))
+            
             # Extract edges and resolve nodes
             (nodes, uuid_map), extracted_edges = await semaphore_gather(
                 resolve_extracted_nodes(
@@ -371,33 +385,100 @@ class Graphiti:
                     previous_episodes,
                     entity_types,
                 ),
-                extract_edges(self.clients, episode, extracted_nodes, previous_episodes, group_id),
+                extract_edges(self.clients, episode, ctx.pending_nodes.values(), previous_episodes, group_id),
             )
-
+            
+            # Update nodes in context with resolved information
+            for node in nodes:
+                if node.uuid in ctx.pending_nodes:
+                    ctx.pending_nodes[node.uuid].attributes.update(node.attributes)
+                    ctx.pending_nodes[node.uuid].labels.extend(node.labels)
+            
+            # Process edges
             edges = resolve_edge_pointers(extracted_edges, uuid_map)
-
+            
+            # Add edges to context
+            for edge in edges:
+                ctx.add_edge(Edge(
+                    uuid=edge.uuid,
+                    source_uuid=edge.source_uuid,
+                    target_uuid=edge.target_uuid,
+                    relation_type=edge.relation_type,
+                    fact=edge.fact,
+                    valid_at=edge.valid_at,
+                    invalid_at=edge.invalid_at
+                ))
+            
+            # Resolve and hydrate
             (resolved_edges, invalidated_edges), hydrated_nodes = await semaphore_gather(
                 resolve_extracted_edges(
                     self.clients,
-                    edges,
+                    list(ctx.pending_edges.values()),
                 ),
                 extract_attributes_from_nodes(
-                    self.clients, nodes, episode, previous_episodes, entity_types
+                    self.clients, 
+                    list(ctx.pending_nodes.values()), 
+                    episode, 
+                    previous_episodes, 
+                    entity_types
                 ),
             )
-
+            
+            # Update nodes with hydrated information
+            for node in hydrated_nodes:
+                if node.uuid in ctx.pending_nodes:
+                    ctx.pending_nodes[node.uuid].attributes.update(node.attributes)
+            
+            # Add resolved and invalidated edges
             entity_edges = resolved_edges + invalidated_edges
-
-            episodic_edges = build_episodic_edges(nodes, episode, now)
-
-            episode.entity_edges = [edge.uuid for edge in entity_edges]
-
+            for edge in entity_edges:
+                if edge.uuid not in ctx.pending_edges:
+                    ctx.add_edge(Edge(
+                        uuid=edge.uuid,
+                        source_uuid=edge.source_uuid,
+                        target_uuid=edge.target_uuid,
+                        relation_type=edge.relation_type,
+                        fact=edge.fact,
+                        valid_at=edge.valid_at,
+                        invalid_at=edge.invalid_at
+                    ))
+            
+            # Build episodic edges
+            episodic_edges = build_episodic_edges(
+                list(ctx.pending_nodes.values()), 
+                episode, 
+                now
+            )
+            
+            # Update episode
+            episode.entity_edges = [edge.uuid for edge in ctx.pending_edges.values()]
+            
             if not self.store_raw_episode_content:
                 episode.content = ''
-
-            await add_nodes_and_edges_bulk(
-                self.driver, [episode], episodic_edges, hydrated_nodes, entity_edges
-            )
+            
+            try:
+                # Commit everything in one transaction
+                await add_nodes_and_edges_bulk(
+                    self.driver, 
+                    [episode], 
+                    episodic_edges, 
+                    list(ctx.pending_nodes.values()), 
+                    list(ctx.pending_edges.values())
+                )
+                # Mark everything as committed
+                ctx.commit_all()
+                
+            except Exception as e:
+                # Roll back context on failure
+                ctx.rollback()
+                logger.error(
+                    f"Failed to add episode",
+                    extra={
+                        'error': str(e),
+                        'stats': ctx.get_stats()
+                    }
+                )
+                raise
 
             # Update any communities
             if update_communities:
