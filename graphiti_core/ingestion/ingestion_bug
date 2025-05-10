@@ -97,10 +97,18 @@ Implement a guaranteed-unique naming system for episodes by prefixing a counter 
 - Global counter to ensure uniqueness across all episodes regardless of group
 
 ```python
-# Implementation for unique episode naming
+# Implementation for unique episode naming using Neo4j
 async def assign_unique_episode_name(clients, original_name):
-    # Get the next global episode counter
-    counter = await clients.redis.incr("global_episode_counter")
+    # Get the next global episode counter using Neo4j under graphiti_internal group
+    query = """
+    MERGE (c:Counter {name: 'episode_counter', group_id: 'graphiti_internal'})
+    ON CREATE SET c.value = 1
+    ON MATCH SET c.value = c.value + 1
+    RETURN c.value as new_counter
+    """
+    
+    result = await clients.neo4j.run_query(query)
+    counter = result[0]['new_counter']
     
     # Format with the counter
     unique_name = f"EP{counter}:{original_name}"
