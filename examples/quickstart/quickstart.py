@@ -35,8 +35,10 @@ from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
 #################################################
 
 # Configure logging
+# Allow logging level via LOG_LEVEL env var
+log_level_env = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=INFO,
+    level=getattr(logging, log_level_env, INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
 )

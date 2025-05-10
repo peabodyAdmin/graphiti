@@ -15,6 +15,14 @@ limitations under the License.
 """
 
 import logging
+import os
+log_level_env = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level_env, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
 from datetime import datetime
 from time import time
 
