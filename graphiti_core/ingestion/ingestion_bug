@@ -1,0 +1,173 @@
+# Bug Report: Graphiti Episode Ingestion Pipeline Failures
+
+## Issue Summary
+Episodes are being lost after acknowledgment due to uncaught exceptions in the Graphiti ingestion pipeline. The issue appears to involve conflicts between entity names and existing nodes, especially when episode names match entity names from previous episodes.
+
+## Affected Components
+- Episode ingestion process in Graphiti
+- Entity extraction and node resolution process
+- Entity deduplication mechanism
+
+## Detailed Findings
+
+### 1. Bare Exception Handling in Critical Pipeline Components
+In graphiti.py, both add_episode and add_episode_bulk methods have exception handling that simply re-raises exceptions without specific handling:
+
+```python
+# In add_episode (line ~423)
+try:
+    # processing logic
+except Exception as e:
+    raise e
+
+# In add_episode_bulk (line ~537)
+try:
+    # processing logic
+except Exception as e:
+    raise e
+```
+
+This pattern pushes error handling to the MCP server, where we find:
+
+```python
+# In process_episode_queue (line ~639)
+try:
+    # Process the episode
+    await process_func()
+except Exception as e:
+    logger.error(f'Error processing queued episode for group_id {group_id}: {str(e)}')
+```
+
+The MCP server logs the error but doesn't retry or recover, simply moving on to the next episode. This means acknowledged episodes can be lost silently when exceptions occur.
+
+### 2. Entity Name/Episode Name Conflict Resolution Failures
+The resolve_extracted_nodes function in node_operations.py searches for existing nodes with similar names to extracted entities:
+
+```python
+search_results: list[SearchResults] = await semaphore_gather(
+    *[
+        search(
+            clients=clients,
+            query=node.name,
+            query_vector=node.name_embedding,
+            group_ids=[node.group_id],
+            search_filter=SearchFilters(),
+            config=NODE_HYBRID_SEARCH_RRF,
+        )
+        for node in extracted_nodes
+    ]
+)
+```
+
+If an episode is named "Mark Hamill" and a previous episode introduced a "Mark Hamill" entity, the deduplication process will detect a conflict between the episode name and the existing entity. This creates an ambiguous situation where:
+
+- The entity resolution system attempts to merge or deduplicate what it sees as duplicate entities
+- This can lead to improper mappings in the uuid_map used to resolve edge pointers
+
+### 3. No Validation for Episode-Entity Name Collisions
+There's no validation before ingestion to check if an episode's name might conflict with existing entities. This means that adding an episode with a name like "Mark Hamill's Portrayal of Luke" could have conflicts with a pre-existing "Mark Hamill" entity.
+
+### 4. Potential UUID Remapping Issues
+When UUIDs are remapped due to entity deduplication:
+
+```python
+# In resolve_extracted_nodes
+uuid_map: dict[str, str] = {}
+for extracted_node, resolved_node in zip(extracted_nodes, resolved_nodes, strict=True):
+    uuid_map[extracted_node.uuid] = resolved_node.uuid
+```
+
+If an entity is mistakenly identified as a duplicate of another entity (possibly due to similar names or embeddings), the remapping could lose critical relationships.
+
+## Root Cause Analysis
+The primary issue appears to be in the node deduplication and resolution process. When an episode has a name similar to an existing entity:
+
+1. The entity extraction process might extract the episode name as an entity
+2. The deduplication process attempts to merge it with the existing entity
+3. This creates a circular reference, which causes the episode's specific nodes and relationships to be lost
+4. The lack of clear exception handling with recovery mechanisms compounds this issue, causing episodes to be dropped from processing without notification.
+
+## Approved Solution
+
+### 1. Guaranteed Unique Episode Names
+Implement a guaranteed-unique naming system for episodes by prefixing a counter to the natural name:
+
+- Format: `EP#:Name` (e.g., `EP42:Mark Hamill Interview`)
+- System-assigned, not client-assigned (clients should be prevented from prefixing numbers)
+- Global counter to ensure uniqueness across all episodes regardless of group
+
+```python
+# Implementation for unique episode naming
+async def assign_unique_episode_name(clients, original_name):
+    # Get the next global episode counter
+    counter = await clients.redis.incr("global_episode_counter")
+    
+    # Format with the counter
+    unique_name = f"EP{counter}:{original_name}"
+    
+    return unique_name
+
+# Modify episode ingestion to use this function
+async def add_episode(clients, episode_data):
+    # Assign a unique name before processing
+    if not episode_data.name.startswith("EP"):
+        episode_data.name = await assign_unique_episode_name(clients, episode_data.name)
+        
+    # Continue with normal processing
+```
+
+### 2. MCP Server Error Handling & Recovery
+MCP Server should implement intelligent error handling with specific strategies:
+
+```python
+# Enhanced error handling in MCP server
+async def process_episode_queue(clients, group_id, episode_data):
+    max_retries = 5  # Increased from 3 to 5
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            await process_func()
+            break
+        except (DatabaseConnectionError, TimeoutError) as e:
+            # Retry for transient errors
+            retry_count += 1
+            # Exponential backoff with 3 seconds base
+            await asyncio.sleep(3 ** retry_count)  
+            logger.warning(f"Retrying episode processing (attempt {retry_count}/{max_retries})")
+        except EntityNameConflictError as e:
+            # Handle specific error types with custom strategies
+            logger.warning(f"Entity name conflict detected: {str(e)}")
+            # Apply name disambiguation strategy
+            await resolve_name_conflict(episode_data)
+            retry_count += 1
+        except Exception as e:
+            logger.error(f"Unrecoverable error processing episode for group_id {group_id}: {str(e)}")
+            logger.error(traceback.format_exc())  # Include stack trace
+            # Store failed episodes for manual recovery
+            await store_failed_episode(episode_data)
+            break
+```
+
+### 3. Additional Recommendations
+
+1. Add specific exception handlers for common failure cases instead of bare `except Exception as e: raise e` patterns. Add general intructions to the MCP server to retry failed episodes based on error message reasons and log the error message for debugging.
+
+2. Add episode-specific labeling to clearly distinguish episodes from entities:
+```python
+# Ensure all episodes are marked with a distinct label that entities never have
+episode.labels = ['Episode'] + episode.labels
+```
+3. Log more detailed error information including stack traces for better debugging.
+
+4. Add uniqueness constraints in the Neo4j database for episode identifiers to prevent conflicts.
+
+5. Implement validation to check if client-provided names follow naming conventions:
+```python
+# Validate that client isn't trying to use EP prefix format
+def validate_client_episode_name(name):
+    if re.match(r'^EP\d+:', name):
+        raise InvalidEpisodeNameError("Episode names cannot use the reserved 'EP#:' prefix format")
+```
+
+By implementing these changes, you will prevent episodes from being lost due to name conflicts, improve the overall robustness of the ingestion pipeline, and ensure proper error handling and recovery mechanisms.
