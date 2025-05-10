@@ -1,23 +1,33 @@
 services:
-  neo4j:
-    image: neo4j:5.26.0
-    ports:
-      - "7474:7474" # HTTP
-      - "7687:7687" # Bolt
-    environment:
-      - NEO4J_AUTH=neo4j/demodemo
-      - NEO4J_server_memory_heap_initial__size=512m
-      - NEO4J_server_memory_heap_max__size=1G
-      - NEO4J_server_memory_pagecache_size=512m
-    volumes:
-      - neo4j_data:/data
-      - neo4j_logs:/logs
-    healthcheck:
-      test: ["CMD", "wget", "-O", "/dev/null", "http://localhost:7474"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+  # neo4j:
+  #   image: neo4j:5.26.0
+  #   ports:
+  #     - "7474:7474" # HTTP
+  #     - "7687:7687" # Bolt
+  #   environment:
+  #     - NEO4J_AUTH=neo4j/demodemo
+  #     - NEO4J_server_memory_heap_initial__size=2G
+  #     - NEO4J_server_memory_heap_max__size=4G
+  #     - NEO4J_server_memory_pagecache_size=2G
+  #     # ask the entry-point to fetch the APOC plugin
+  #     - NEO4J_PLUGINS='["apoc"]'
+
+  #     # unblock all APOC procs / functions
+  #     - NEO4J_dbms_security_procedures_allowlist=apoc.*
+  #     - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+  #   volumes:
+  #     # <project-root>/neo4j_data → /data  (graph db itself)
+  #     - ../neo4j_data:/data
+  #     # <project-root>/neo4j_logs → /logs  (debug.log, query.log, etc.)
+  #     - ../neo4j_logs:/logs
+  #     # only if you keep APOC jars outside the image
+  #     # ../neo4j_plugins:/plugins
+  #   healthcheck:
+  #     test: ["CMD", "wget", "-O", "/dev/null", "http://localhost:7474"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #     start_period: 30s
 
   graphiti-mcp:
     build:
@@ -30,15 +40,19 @@ services:
       neo4j:
         condition: service_healthy
     environment:
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=demodemo
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - MODEL_NAME=${MODEL_NAME}
       - PATH=/root/.local/bin:${PATH}
     ports:
       - "8000:8000" # Expose the MCP server via HTTP for SSE transport
-    command: ["uv", "run", "graphiti_mcp_server.py", "--transport", "sse"]
+    command: ["uv", "run", "graphiti_mcp_server.py", "--transport", "sse", "--use-custom-entities"]
+
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
 
 volumes:
   neo4j_data:
