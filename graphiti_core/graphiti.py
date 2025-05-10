@@ -282,6 +282,7 @@ class Graphiti:
         update_communities: bool = False,
         entity_types: dict[str, BaseModel] | None = None,
         previous_episode_uuids: list[str] | None = None,
+        telemetry_client = None,
     ) -> AddEpisodeResults:
         """
         Process an episode and update the graph.
@@ -335,9 +336,25 @@ class Graphiti:
         try:
             start = time()
             now = utc_now()
+            
+            # Record start of processing with telemetry
+            if telemetry_client:
+                await telemetry_client.record_episode_start(
+                    episode_id=name,
+                    original_name=name,
+                    group_id=group_id
+                )
 
             validate_entity_types(entity_types)
 
+            # Record previous episode retrieval step
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_id=name,
+                    step_name="retrieve_previous_episodes", 
+                    status="started"
+                )
+                
             previous_episodes = (
                 await self.retrieve_episodes(
                     reference_time,
@@ -348,6 +365,15 @@ class Graphiti:
                 if previous_episode_uuids is None
                 else await EpisodicNode.get_by_uuids(self.driver, previous_episode_uuids)
             )
+            
+            # Record successful retrieval
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_id=name,
+                    step_name="retrieve_previous_episodes", 
+                    status="success",
+                    data={"episode_count": len(previous_episodes)}
+                )
 
             episode = (
                 await EpisodicNode.get_by_uuid(self.driver, uuid)
@@ -365,12 +391,34 @@ class Graphiti:
             )
 
             # Extract entities as nodes
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_id=name,
+                    step_name="node_extraction", 
+                    status="started"
+                )
 
             extracted_nodes = await extract_nodes(
                 self.clients, episode, previous_episodes, entity_types
             )
+            
+            # Record successful node extraction
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_id=name,
+                    step_name="node_extraction", 
+                    status="success",
+                    data={"extracted_node_count": len(extracted_nodes)}
+                )
 
             # Extract edges and resolve nodes
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_id=name,
+                    step_name="edge_extraction_node_resolution", 
+                    status="started"
+                )
+                
             (nodes, uuid_map), extracted_edges = await semaphore_gather(
                 resolve_extracted_nodes(
                     self.clients,
@@ -381,9 +429,25 @@ class Graphiti:
                 ),
                 extract_edges(self.clients, episode, extracted_nodes, previous_episodes, group_id),
             )
+            
+            # Record successful edge extraction and node resolution
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_id=name,
+                    step_name="edge_extraction_node_resolution", 
+                    status="success",
+                    data={"resolved_node_count": len(nodes), "extracted_edge_count": len(extracted_edges)}
+                )
 
             edges = resolve_edge_pointers(extracted_edges, uuid_map)
 
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_id=name,
+                    step_name="edge_resolution_node_hydration", 
+                    status="started"
+                )
+                
             (resolved_edges, invalidated_edges), hydrated_nodes = await semaphore_gather(
                 resolve_extracted_edges(
                     self.clients,
@@ -393,6 +457,19 @@ class Graphiti:
                     self.clients, nodes, episode, previous_episodes, entity_types
                 ),
             )
+            
+            # Record successful edge resolution and node hydration
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_id=name,
+                    step_name="edge_resolution_node_hydration", 
+                    status="success",
+                    data={
+                        "resolved_edge_count": len(resolved_edges),
+                        "invalidated_edge_count": len(invalidated_edges),
+                        "hydrated_node_count": len(hydrated_nodes)
+                    }
+                )
 
             entity_edges = resolved_edges + invalidated_edges
 
@@ -403,9 +480,30 @@ class Graphiti:
             if not self.store_raw_episode_content:
                 episode.content = ''
 
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_id=name,
+                    step_name="database_update", 
+                    status="started"
+                )
+                
             await add_nodes_and_edges_bulk(
                 self.driver, [episode], episodic_edges, hydrated_nodes, entity_edges
             )
+            
+            # Record successful database update
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_id=name,
+                    step_name="database_update", 
+                    status="success",
+                    data={
+                        "episode_count": 1,
+                        "episodic_edge_count": len(episodic_edges),
+                        "node_count": len(hydrated_nodes),
+                        "entity_edge_count": len(entity_edges)
+                    }
+                )
 
             # Update any communities
             if update_communities:
@@ -416,15 +514,40 @@ class Graphiti:
                     ]
                 )
             end = time()
-            logger.info(f'Completed add_episode in {(end - start) * 1000} ms')
+            processing_time_ms = (end - start) * 1000
+            logger.info(f'Completed add_episode in {processing_time_ms} ms')
+            
+            # Record episode completion
+            if telemetry_client:
+                await telemetry_client.record_episode_completion(
+                    episode_id=name,
+                    status="completed"
+                )
 
             return AddEpisodeResults(episode=episode, nodes=nodes, edges=entity_edges)
 
         except Exception as e:
+            # Record error in telemetry
+            if telemetry_client:
+                import traceback
+                current_step = "unknown"  # We don't know exactly where it failed
+                for episode_data in bulk_episodes:
+                    await telemetry_client.record_error(
+                        episode_id=episode_data.name,
+                        step_name=current_step,
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        stack_trace=traceback.format_exc()
+                    )
+                    # Mark episode as failed
+                    await telemetry_client.record_episode_completion(
+                        episode_id=episode_data.name,
+                        status="failed"
+                    )
             raise e
 
     #### WIP: USE AT YOUR OWN RISK ####
-    async def add_episode_bulk(self, bulk_episodes: list[RawEpisode], group_id: str = ''):
+    async def add_episode_bulk(self, bulk_episodes: list[RawEpisode], group_id: str = '', telemetry_client = None):
         """
         Process multiple episodes in bulk and update the graph.
 
@@ -480,17 +603,71 @@ class Graphiti:
             ]
 
             # Save all the episodes
+            if telemetry_client:
+                for episode in episodes:
+                    await telemetry_client.record_processing_step(
+                        episode_id=episode.name,
+                        step_name="episode_save", 
+                        status="started"
+                    )
+                    
             await semaphore_gather(*[episode.save(self.driver) for episode in episodes])
+            
+            if telemetry_client:
+                for episode in episodes:
+                    await telemetry_client.record_processing_step(
+                        episode_id=episode.name,
+                        step_name="episode_save", 
+                        status="success"
+                    )
 
             # Get previous episode context for each episode
+            if telemetry_client:
+                for episode in episodes:
+                    await telemetry_client.record_processing_step(
+                        episode_id=episode.name,
+                        step_name="retrieve_previous_episodes", 
+                        status="started"
+                    )
+                    
             episode_pairs = await retrieve_previous_episodes_bulk(self.driver, episodes)
+            
+            if telemetry_client:
+                for episode in episodes:
+                    await telemetry_client.record_processing_step(
+                        episode_id=episode.name,
+                        step_name="retrieve_previous_episodes", 
+                        status="success",
+                        data={"episode_count": len(episode_pairs)}
+                    )
 
             # Extract all nodes and edges
+            if telemetry_client:
+                for episode in episodes:
+                    await telemetry_client.record_processing_step(
+                        episode_id=episode.name,
+                        step_name="node_edge_extraction", 
+                        status="started"
+                    )
+                    
             (
                 extracted_nodes,
                 extracted_edges,
                 episodic_edges,
             ) = await extract_nodes_and_edges_bulk(self.clients, episode_pairs)
+            
+            if telemetry_client:
+                for episode in episodes:
+                    await telemetry_client.record_processing_step(
+                        episode_id=episode.name,
+                        step_name="node_edge_extraction", 
+                        status="success",
+                        data={
+                            "extracted_node_count": len(extracted_nodes), 
+                            "extracted_edge_count": len(extracted_edges),
+                            "episodic_edge_count": len(episodic_edges)
+                        }
+                    )
 
             # Generate embeddings
             await semaphore_gather(
@@ -532,9 +709,35 @@ class Graphiti:
             await semaphore_gather(*[edge.save(self.driver) for edge in edges])
 
             end = time()
-            logger.info(f'Completed add_episode_bulk in {(end - start) * 1000} ms')
+            processing_time_ms = (end - start) * 1000
+            logger.info(f'Completed add_episode_bulk in {processing_time_ms} ms')
+            
+            # Record successful completion
+            if telemetry_client:
+                for episode in episodes:
+                    await telemetry_client.record_episode_completion(
+                        episode_id=episode.name,
+                        status="completed"
+                    )
 
         except Exception as e:
+            # Record error in telemetry
+            if telemetry_client:
+                import traceback
+                current_step = "unknown"  # We don't know exactly where it failed
+                for episode_data in bulk_episodes:
+                    await telemetry_client.record_error(
+                        episode_id=episode_data.name,
+                        step_name=current_step,
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        stack_trace=traceback.format_exc()
+                    )
+                    # Mark episode as failed
+                    await telemetry_client.record_episode_completion(
+                        episode_id=episode_data.name,
+                        status="failed"
+                    )
             raise e
 
     async def build_communities(self, group_ids: list[str] | None = None) -> list[CommunityNode]:

@@ -9,6 +9,12 @@ import logging
 import os
 import sys
 import uuid
+from pathlib import Path
+
+# Add the parent directory to Python's module path so imports like 'mcp_server.xyz' work
+parent_dir = str(Path(__file__).parent.parent)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, TypedDict, cast
@@ -35,6 +41,9 @@ from graphiti_core.search.search_config_recipes import (
 )
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
+from mcp_server.telemetry.config import TelemetryConfig
+from mcp_server.telemetry.initialization import initialize_telemetry
+from mcp_server.telemetry.shared import telemetry_client as shared_telemetry_client
 
 load_dotenv()
 
@@ -158,6 +167,11 @@ class EpisodeSearchResponse(TypedDict):
 
 class StatusResponse(TypedDict):
     status: str
+    message: str
+
+
+class TelemetryResponse(TypedDict):
+    data: Any
     message: str
 
 
@@ -439,6 +453,7 @@ class GraphitiConfig(BaseModel):
     llm: GraphitiLLMConfig = Field(default_factory=GraphitiLLMConfig)
     embedder: GraphitiEmbedderConfig = Field(default_factory=GraphitiEmbedderConfig)
     neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     group_id: str | None = None
     use_custom_entities: bool = False
     destroy_graph: bool = False
@@ -450,25 +465,37 @@ class GraphitiConfig(BaseModel):
             llm=GraphitiLLMConfig.from_env(),
             embedder=GraphitiEmbedderConfig.from_env(),
             neo4j=Neo4jConfig.from_env(),
+            telemetry=TelemetryConfig.from_env(),
+            group_id=os.environ.get('GROUP_ID'),
+            use_custom_entities=os.environ.get('USE_CUSTOM_ENTITIES', 'false').lower() == 'true',
+            destroy_graph=os.environ.get('DESTROY_GRAPH', 'false').lower() == 'true',
         )
 
     @classmethod
     def from_cli_and_env(cls, args: argparse.Namespace) -> 'GraphitiConfig':
         """Create configuration from CLI arguments, falling back to environment variables."""
-        # Start with environment configuration
         config = cls.from_env()
 
-        # Apply CLI overrides
+        # Override with CLI arguments if provided
+        if args.neo4j_uri:
+            config.neo4j.uri = args.neo4j_uri
+        if args.neo4j_user:
+            config.neo4j.user = args.neo4j_user
+        if args.neo4j_password:
+            config.neo4j.password = args.neo4j_password
+        if args.openai_api_key:
+            config.llm.api_key = args.openai_api_key
+        if args.model_name:
+            config.llm.model = args.model_name
+        if args.temperature is not None:
+            config.llm.temperature = args.temperature
         if args.group_id:
             config.group_id = args.group_id
-        else:
-            config.group_id = f'graph_{uuid.uuid4().hex[:8]}'
-
-        config.use_custom_entities = args.use_custom_entities
-        config.destroy_graph = args.destroy_graph
-
-        # Update LLM config using CLI args
-        config.llm = GraphitiLLMConfig.from_cli_and_env(args)
+        if args.use_custom_entities:
+            config.use_custom_entities = args.use_custom_entities
+        if args.destroy_graph:
+            config.destroy_graph = args.destroy_graph
+        # We could add CLI arguments for telemetry here in the future
 
         return config
 
@@ -494,6 +521,10 @@ logger = logging.getLogger(__name__)
 
 # Create global config instance - will be properly initialized later
 config = GraphitiConfig()
+
+# Initialize global MCP config and telemetry client
+mcp_config = MCPConfig()
+telemetry_client = None
 
 # MCP server instructions
 GRAPHITI_MCP_INSTRUCTIONS = """
@@ -538,7 +569,7 @@ graphiti_client: Graphiti | None = None
 
 async def initialize_graphiti():
     """Initialize the Graphiti client with the configured settings."""
-    global graphiti_client, config
+    global graphiti_client, config, telemetry_client
 
     try:
         # Create LLM client if possible
@@ -553,6 +584,18 @@ async def initialize_graphiti():
 
         embedder_client = config.embedder.create_client()
         cross_encoder_client = config.llm.create_cross_encoder_client()
+        
+        # Initialize telemetry client
+        telemetry_client = await initialize_telemetry(
+            config.telemetry,
+            main_uri=config.neo4j.uri,
+            main_user=config.neo4j.user,
+            main_password=config.neo4j.password
+        )
+        
+        # Set the shared telemetry client for diagnostic tools
+        global shared_telemetry_client
+        shared_telemetry_client = telemetry_client
 
         # Initialize Graphiti client
         graphiti_client = Graphiti(
@@ -612,6 +655,9 @@ def format_fact_result(edge: EntityEdge) -> dict[str, Any]:
 # Dictionary to store queues for each group_id
 # Each queue is a list of tasks to be processed sequentially
 episode_queues: dict[str, asyncio.Queue] = {}
+
+# Global telemetry client instance
+telemetry_client = None
 # Dictionary to track if a worker is running for each group_id
 queue_workers: dict[str, bool] = {}
 
@@ -629,15 +675,27 @@ async def process_episode_queue(group_id: str):
 
     try:
         while True:
-            # Get the next episode processing function from the queue
+            # Get the next episode data from the queue
             # This will wait if the queue is empty
-            process_func = await episode_queues[group_id].get()
+            episode_data = await episode_queues[group_id].get()
 
             try:
-                # Process the episode
-                await process_func()
+                # Process the episode using our telemetry-enabled processor
+                from mcp_server.services.episode_processor import process_episode_queue as process_with_telemetry
+                
+                # Create clients object from our global graphiti client
+                clients = graphiti_client.clients
+                
+                # Process the episode with telemetry
+                await process_with_telemetry(
+                    clients=clients,
+                    telemetry_client=telemetry_client,
+                    group_id=group_id,
+                    episode_data=episode_data
+                )
             except Exception as e:
                 logger.error(f'Error processing queued episode for group_id {group_id}: {str(e)}')
+                logger.error(traceback.format_exc())
             finally:
                 # Mark the task as done regardless of success/failure
                 episode_queues[group_id].task_done()
@@ -645,6 +703,7 @@ async def process_episode_queue(group_id: str):
         logger.info(f'Episode queue worker for group_id {group_id} was cancelled')
     except Exception as e:
         logger.error(f'Unexpected error in queue worker for group_id {group_id}: {str(e)}')
+        logger.error(traceback.format_exc())
     finally:
         queue_workers[group_id] = False
         logger.info(f'Stopped episode queue worker for group_id: {group_id}')
@@ -741,41 +800,24 @@ async def add_episode(
         # Use cast to help the type checker understand that graphiti_client is not None
         client = cast(Graphiti, graphiti_client)
 
-        # Define the episode processing function
-        async def process_episode():
-            try:
-                logger.info(f"Processing queued episode '{name}' for group_id: {group_id_str}")
-                # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
-                entity_types = ENTITY_TYPES if config.use_custom_entities else {}
-
-                await client.add_episode(
-                    name=name,
-                    episode_body=episode_body,
-                    source=source_type,
-                    source_description=source_description,
-                    group_id=group_id_str,  # Using the string version of group_id
-                    uuid=uuid,
-                    reference_time=datetime.now(timezone.utc),
-                    entity_types=entity_types,
-                )
-                logger.info(f"Episode '{name}' added successfully")
-
-                logger.info(f"Building communities after episode '{name}'")
-                await client.build_communities()
-
-                logger.info(f"Episode '{name}' processed successfully")
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(
-                    f"Error processing episode '{name}' for group_id {group_id_str}: {error_msg}"
-                )
+        # Prepare the episode data for the queue
+        episode_data = {
+            "name": name,
+            "episode_body": episode_body,
+            "source": source_type,
+            "source_description": source_description,
+            "uuid": uuid,
+            "reference_time": datetime.now(timezone.utc),
+            "entity_types": ENTITY_TYPES if config.use_custom_entities else {},
+            "update_communities": True  # We'll still build communities after the episode
+        }
 
         # Initialize queue for this group_id if it doesn't exist
         if group_id_str not in episode_queues:
             episode_queues[group_id_str] = asyncio.Queue()
 
-        # Add the episode processing function to the queue
-        await episode_queues[group_id_str].put(process_episode)
+        # Add the episode data to the queue
+        await episode_queues[group_id_str].put(episode_data)
 
         # Start a worker for this queue if one isn't already running
         if not queue_workers.get(group_id_str, False):
@@ -1115,87 +1157,238 @@ async def get_status() -> StatusResponse:
         }
 
 
-async def initialize_server() -> MCPConfig:
-    """Parse CLI arguments and initialize the Graphiti server configuration."""
-    global config
+async def initialize_server() -> tuple[FastMCP, MCPConfig]:
+    """Parse CLI arguments and initialize the Graphiti server configuration.
+    
+    Returns:
+        tuple: (FastMCP instance, MCPConfig instance)
+    """
+    global mcp, config, telemetry_client, mcp_config
 
-    parser = argparse.ArgumentParser(
-        description='Run the Graphiti MCP server with optional LLM client'
-    )
+    parser = argparse.ArgumentParser(description='Graphiti MCP Server')
+
+    # Neo4j connection settings
+    parser.add_argument('--neo4j-uri', help='Neo4j URI')
+    parser.add_argument('--neo4j-user', help='Neo4j username')
+    parser.add_argument('--neo4j-password', help='Neo4j password')
+
+    # OpenAI API settings
+    parser.add_argument('--openai-api-key', help='OpenAI API key for LLM access')
+    parser.add_argument('--model-name', help='Model to use for extraction (e.g. gpt-4)')
     parser.add_argument(
-        '--group-id',
-        help='Namespace for the graph. This is an arbitrary string used to organize related data. '
-        'If not provided, a random UUID will be generated.',
+        '--temperature', type=float, help='Temperature for model generation (e.g. 0.7)'
     )
-    parser.add_argument(
-        '--transport',
-        choices=['sse', 'stdio'],
-        default='sse',
-        help='Transport to use for communication with the client. (default: sse)',
-    )
-    parser.add_argument(
-        '--model', help=f'Model name to use with the LLM client. (default: {DEFAULT_LLM_MODEL})'
-    )
-    parser.add_argument(
-        '--temperature',
-        type=float,
-        help='Temperature setting for the LLM (0.0-2.0). Lower values make output more deterministic. (default: 0.7)',
-    )
-    parser.add_argument('--destroy-graph', action='store_true', help='Destroy all Graphiti graphs')
+
+    # Feature flags and configuration
+    parser.add_argument('--group-id', help='Group ID for knowledge graph partitioning')
     parser.add_argument(
         '--use-custom-entities',
         action='store_true',
-        help='Enable entity extraction using the predefined ENTITY_TYPES',
+        help='Enable custom entity extraction for domain-specific entities',
+    )
+    parser.add_argument(
+        '--destroy-graph', action='store_true', help='Clear the graph on startup (dangerous!)'
+    )
+    
+    # Telemetry settings
+    parser.add_argument(
+        '--enable-telemetry',
+        action='store_true',
+        help='Enable telemetry data collection',
+        default=True
+    )
+
+    # MCP transport configuration
+    parser.add_argument(
+        '--transport',
+        choices=['stdio', 'sse'],
+        default='sse',
+        help='Transport mechanism for MCP (stdio or sse)',
     )
 
     args = parser.parse_args()
 
-    # Build configuration from CLI arguments and environment variables
+    # Initialize configuration from environment variables and CLI arguments
     config = GraphitiConfig.from_cli_and_env(args)
+    mcp_config = MCPConfig.from_cli(args)
 
-    # Log the group ID configuration
-    if args.group_id:
-        logger.info(f'Using provided group_id: {config.group_id}')
-    else:
-        logger.info(f'Generated random group_id: {config.group_id}')
+    # Initialize MCP server with appropriate transport
+    transport = mcp_config.transport
+    if transport == 'stdio':
+        mcp = FastMCP()
+    else:  # Default to SSE (Server-Sent Events)
+        mcp = FastMCP('sse')
 
-    # Log entity extraction configuration
-    if config.use_custom_entities:
-        logger.info('Entity extraction enabled using predefined ENTITY_TYPES')
-    else:
-        logger.info('Entity extraction disabled (no custom entities will be used)')
-
-    # Initialize Graphiti
-    await initialize_graphiti()
-
-    # Return MCP configuration
-    return MCPConfig.from_cli(args)
+    return mcp, mcp_config
 
 
 async def run_mcp_server():
     """Run the MCP server in the current event loop."""
-    # Initialize the server
-    mcp_config = await initialize_server()
+    global mcp, telemetry_client, mcp_config
 
-    # Run the server with stdio transport for MCP in the same event loop
-    logger.info(f'Starting MCP server with transport: {mcp_config.transport}')
-    if mcp_config.transport == 'stdio':
-        await mcp.run_stdio_async()
-    elif mcp_config.transport == 'sse':
-        logger.info(
-            f'Running MCP server with SSE transport on {mcp.settings.host}:{mcp.settings.port}'
-        )
-        await mcp.run_sse_async()
+    # Initialize server and Graphiti
+    logger.info('Initializing Graphiti MCP Server...')
+    mcp, mcp_config = await initialize_server()
+    await initialize_graphiti()
+    
+    # Register all MCP tools
+    logger.info('Registering MCP tools')
+    
+    # Core knowledge graph tools
+    mcp.tool()(add_episode)
+    mcp.tool()(search_nodes)
+    mcp.tool()(search_facts)
+    mcp.tool()(get_entity_edge)
+    mcp.tool()(delete_entity_edge)
+    mcp.tool()(delete_episode)
+    mcp.tool()(get_episodes)
+    mcp.tool()(clear_graph)
+    mcp.tool()(get_status)
+    
+    # Always register telemetry diagnostic tools (they'll return appropriate errors if telemetry is disabled)
+    logger.info('Registering telemetry diagnostic tools')
+    mcp.tool()(telemetry_episode_trace)
+    mcp.tool()(telemetry_error_patterns)
+    mcp.tool()(telemetry_episodes_with_error)
+    mcp.tool()(telemetry_stats)
+    mcp.tool()(telemetry_recent_errors)
+
+    # Get transport config from mcp_config, don't rely on settings object
+    transport = mcp_config.transport
+    logger.info(f'Starting MCP server with transport: {transport}')
+    try:
+        if transport == 'stdio':
+            logger.info('About to start stdio transport')
+            await mcp.run_stdio_async()
+        elif transport == 'sse':
+            logger.info(
+                f'Running MCP server with SSE transport'
+            )
+            await mcp.run_sse_async()
+    except Exception as e:
+        logger.error(f'Error starting MCP server: {e}')
+        # Print stack trace to help debug the issue
+        import traceback
+        logger.error(traceback.format_exc())
+
+
+@mcp.tool()
+async def telemetry_episode_trace(episode_id: str) -> TelemetryResponse | ErrorResponse:
+    """Get the full processing trace for an episode.
+    
+    This tool provides detailed information about all processing steps and errors that occurred
+    during the processing of a specific episode.
+    
+    Args:
+        episode_id: The unique ID of the episode to get trace information for
+    """
+    if not telemetry_client:
+        return {"error": "Telemetry system is not enabled"}
+        
+    try:
+        from mcp_server.telemetry.diagnostic_queries import EPISODE_HISTORY_QUERY
+        from mcp_server.api.diagnostics import format_episode_trace
+        
+        result = await telemetry_client.run_query(EPISODE_HISTORY_QUERY, {"episode_id": episode_id})
+        trace_data = format_episode_trace(result)
+        return {"data": trace_data, "message": f"Successfully retrieved trace for episode {episode_id}"}
+    except Exception as e:
+        return {"error": f"Failed to retrieve episode trace: {str(e)}"}
+
+
+@mcp.tool()
+async def telemetry_error_patterns() -> TelemetryResponse | ErrorResponse:
+    """Get patterns of errors across episodes.
+    
+    This tool analyzes all telemetry data to identify common error patterns
+    across multiple episodes, helping to identify systematic issues.
+    """
+    if not telemetry_client:
+        return {"error": "Telemetry system is not enabled"}
+        
+    try:
+        from mcp_server.telemetry.diagnostic_queries import ERROR_PATTERNS_QUERY
+        
+        result = await telemetry_client.run_query(ERROR_PATTERNS_QUERY)
+        return {"data": result, "message": "Successfully retrieved error patterns"}
+    except Exception as e:
+        return {"error": f"Failed to retrieve error patterns: {str(e)}"}
+
+
+@mcp.tool()
+async def telemetry_episodes_with_error(error_type: str) -> TelemetryResponse | ErrorResponse:
+    """Get all episodes affected by a specific error type.
+    
+    This tool allows you to find all episodes that experienced a particular type of error,
+    helping to understand the impact and scope of specific issues.
+    
+    Args:
+        error_type: The type of error to search for (e.g., "DatabaseConnectionError")
+    """
+    if not telemetry_client:
+        return {"error": "Telemetry system is not enabled"}
+        
+    try:
+        from mcp_server.telemetry.diagnostic_queries import EPISODES_WITH_ERROR_TYPE_QUERY
+        
+        result = await telemetry_client.run_query(EPISODES_WITH_ERROR_TYPE_QUERY, {"error_type": error_type})
+        return {"data": result, "message": f"Successfully retrieved episodes with error type: {error_type}"}
+    except Exception as e:
+        return {"error": f"Failed to retrieve episodes with error: {str(e)}"}
+
+
+@mcp.tool()
+async def telemetry_stats() -> TelemetryResponse | ErrorResponse:
+    """Get overall episode processing statistics.
+    
+    This tool provides summary statistics about all episode processing activities,
+    including success rates, failure counts, and average processing times.
+    """
+    if not telemetry_client:
+        return {"error": "Telemetry system is not enabled"}
+        
+    try:
+        from mcp_server.telemetry.diagnostic_queries import PROCESSING_STATS_QUERY
+        
+        result = await telemetry_client.run_query(PROCESSING_STATS_QUERY)
+        stats = result[0] if result else {"no_data": True}
+        return {"data": stats, "message": "Successfully retrieved processing statistics"}
+    except Exception as e:
+        return {"error": f"Failed to retrieve processing statistics: {str(e)}"}
+
+
+@mcp.tool()
+async def telemetry_recent_errors() -> TelemetryResponse | ErrorResponse:
+    """Get the most recent errors from episode processing.
+    
+    This tool returns the 20 most recent errors that occurred during episode processing,
+    providing a quick view of recent issues.
+    """
+    if not telemetry_client:
+        return {"error": "Telemetry system is not enabled"}
+        
+    try:
+        from mcp_server.telemetry.diagnostic_queries import RECENT_ERRORS_QUERY
+        
+        result = await telemetry_client.run_query(RECENT_ERRORS_QUERY)
+        return {"data": result, "message": "Successfully retrieved recent errors"}
+    except Exception as e:
+        return {"error": f"Failed to retrieve recent errors: {str(e)}"}
 
 
 def main():
     """Main function to run the Graphiti MCP server."""
     try:
-        # Run everything in a single event loop
+        logger.info('Starting main function')
         asyncio.run(run_mcp_server())
+        logger.info('Server completed normally')
+    except KeyboardInterrupt:
+        logger.info('Server stopped by user')
     except Exception as e:
-        logger.error(f'Error initializing Graphiti MCP server: {str(e)}')
-        raise
+        logger.error(f'Error running server: {e}')
+        # Print stack trace to help debug the issue
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 if __name__ == '__main__':

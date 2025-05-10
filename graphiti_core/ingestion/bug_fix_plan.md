@@ -5,7 +5,7 @@ This document outlines the step-by-step implementation plan for addressing the e
 ## Phase 1: MCP Server Telemetry & Diagnostic System
 
 ### Neo4j Telemetry Schema
-- [ ] Define telemetry graph schema in `/mcp_server/telemetry/schema.py`
+- [*] Define telemetry graph schema in `/mcp_server/telemetry/schema.py`
   ```python
   # Schema for episode processing telemetry
   # All telemetry nodes and relationships will use group_id "graphiti_logs"
@@ -70,7 +70,7 @@ This document outlines the step-by-step implementation plan for addressing the e
   ```
 
 ### Direct Neo4j Connection for Telemetry
-- [ ] Create Neo4j telemetry client in `/mcp_server/telemetry/neo4j_client.py`
+- [*] Create Neo4j telemetry client in `/mcp_server/telemetry/neo4j_client.py`
   ```python
   class TelemetryNeo4jClient:
       """Direct Neo4j client for telemetry, bypassing Graphiti but using same connection details."""
@@ -109,7 +109,7 @@ This document outlines the step-by-step implementation plan for addressing the e
   ```
 
 ### Instrumentation Hook Points
-- [ ] Add telemetry hooks in `/mcp_server/services/episode_processor.py`
+- [*] Add telemetry hooks in `/mcp_server/services/episode_processor.py`
   ```python
   async def process_episode_queue(clients, telemetry_client, group_id, episode_data):
       # Record start of processing
@@ -196,7 +196,7 @@ This document outlines the step-by-step implementation plan for addressing the e
               break
   ```
 
-- [ ] Add telemetry hooks in `/graphiti_core/graphiti.py`
+- [*] Add telemetry hooks in `/graphiti_core/graphiti.py`
   ```python
   # Add in both add_episode and add_episode_bulk methods:
   
@@ -231,7 +231,7 @@ This document outlines the step-by-step implementation plan for addressing the e
   ```
 
 ### Telemetry Dashboard and Analysis
-- [ ] Create diagnostic queries in `/mcp_server/telemetry/diagnostic_queries.py`
+- [*] Create diagnostic queries in `/mcp_server/telemetry/diagnostic_queries.py`
   ```python
   # Queries to analyze telemetry data
   
@@ -261,7 +261,7 @@ This document outlines the step-by-step implementation plan for addressing the e
   """
   ```
 
-- [ ] Create MCP diagnostic tools in `/mcp_server/api/diagnostics.py`
+- [*] Create MCP diagnostic tools in `/mcp_server/api/diagnostics.py`
   ```python
   @router.get("/api/diagnostics/episodes/{episode_id}/trace")
   async def get_episode_trace(episode_id: str, telemetry_client: TelemetryNeo4jClient = Depends(get_telemetry_client)):
@@ -283,7 +283,7 @@ This document outlines the step-by-step implementation plan for addressing the e
   ```
 
 ### Telemetry Infrastructure Setup
-- [ ] Create database indices for telemetry data in `/mcp_server/telemetry/schema_setup.py`
+- [*] Create database indices for telemetry data in `/mcp_server/telemetry/schema_setup.py`
   ```python
   # Cypher queries to set up telemetry schema
   
@@ -299,7 +299,7 @@ This document outlines the step-by-step implementation plan for addressing the e
               await session.run(index_query)
   ```
 
-- [ ] Initialize telemetry in MCP server startup in `/mcp_server/main.py`
+- [*] Initialize telemetry in MCP server startup in `/mcp_server/graphiti_mcp_server.py`
   ```python
   # Initialize telemetry client
   telemetry_client = TelemetryNeo4jClient(
