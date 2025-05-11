@@ -1290,13 +1290,52 @@ async def telemetry_episode_trace(episode_id: str) -> TelemetryResponse | ErrorR
         return {"error": "Telemetry system is not enabled"}
         
     try:
-        from mcp_server.telemetry.diagnostic_queries import EPISODE_HISTORY_QUERY
-        from mcp_server.api.diagnostics import format_episode_trace
+        # Direct query instead of importing format_episode_trace which depends on fastapi
+        episode_history_query = """
+        MATCH (log:EpisodeProcessingLog {episode_id: $episode_id})
+        OPTIONAL MATCH (log)-[:PROCESSED]->(step:ProcessingStep)
+        OPTIONAL MATCH (step)-[:GENERATED_ERROR]->(error:ProcessingError)
+        RETURN log, step, error
+        ORDER BY step.start_time ASC
+        """
         
-        result = await telemetry_client.run_query(EPISODE_HISTORY_QUERY, {"episode_id": episode_id})
-        trace_data = format_episode_trace(result)
+        result = await telemetry_client.run_query(episode_history_query, {"episode_id": episode_id})
+        
+        if not result:
+            return {"error": f"No telemetry data found for episode {episode_id}"}
+            
+        # Manual formatting of the result
+        trace_data = {
+            "episode_id": episode_id,
+            "steps": []
+        }
+        
+        # Process the results
+        for record in result:
+            if 'step' in record and record['step']:
+                step_data = {
+                    "step_name": record['step'].get('step_name', 'unknown'),
+                    "status": record['step'].get('status', 'unknown'),
+                    "start_time": record['step'].get('start_time', None),
+                    "end_time": record['step'].get('end_time', None),
+                    "data": record['step'].get('data', '{}'),
+                    "errors": []
+                }
+                
+                if 'error' in record and record['error']:
+                    error_data = {
+                        "error_type": record['error'].get('error_type', 'unknown'),
+                        "error_message": record['error'].get('error_message', ''),
+                        "created_at": record['error'].get('created_at', None)
+                    }
+                    step_data["errors"].append(error_data)
+                    
+                trace_data["steps"].append(step_data)
+                
         return {"data": trace_data, "message": f"Successfully retrieved trace for episode {episode_id}"}
     except Exception as e:
+        logger.error(f"Error retrieving episode trace: {e}")
+        logger.error(traceback.format_exc())
         return {"error": f"Failed to retrieve episode trace: {str(e)}"}
 
 

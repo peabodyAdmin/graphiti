@@ -82,6 +82,7 @@ class TelemetryNeo4jClient:
         Returns:
             The result of the query or None if it failed
         """
+        logger.info(f"Recording processing step for episode {episode_id}: {step_name} - {status}")
         # First check if the episode exists
         check_episode_query = """
         MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
@@ -117,7 +118,7 @@ class TelemetryNeo4jClient:
         CREATE (s:ProcessingStep {
             step_name: $step_name,
             start_time: CASE WHEN $status = 'started' THEN datetime() ELSE datetime() END,
-            end_time: CASE WHEN $status != 'started' THEN datetime() ELSE null END,
+            end_time: CASE WHEN $status <> 'started' THEN datetime() ELSE null END,
             status: $status,
             data: $data,
             group_id: 'graphiti_logs'
@@ -134,12 +135,25 @@ class TelemetryNeo4jClient:
         # Extract the node ID from the dictionary result
         step_id = None
         if step_result and len(step_result) > 0 and 's' in step_result[0]:
-            # Node ID is stored in elementId property for Neo4j 4.0+
-            if isinstance(step_result[0]['s'], dict) and 'elementId' in step_result[0]['s']:
-                step_id = step_result[0]['s']['elementId']
-            # Fallback to 'identity' property for older Neo4j versions
-            elif isinstance(step_result[0]['s'], dict) and 'identity' in step_result[0]['s']:
-                step_id = step_result[0]['s']['identity']
+            node = step_result[0]['s']
+            # Try all possible ways to extract the ID
+            if isinstance(node, dict):
+                # Neo4j 4.0+ uses elementId
+                if 'elementId' in node:
+                    step_id = node['elementId']
+                # Older Neo4j versions use identity
+                elif 'identity' in node:
+                    step_id = node['identity']
+                # Some drivers might use id
+                elif 'id' in node:
+                    step_id = node['id']
+                # Last resort, try to get _id for Neo4j 3.x
+                elif '_id' in node:
+                    step_id = node['_id']
+                # If we have no ID but have element ID as a function
+                elif hasattr(node, 'element_id') and callable(getattr(node, 'element_id')):
+                    step_id = node.element_id()
+            logger.debug(f"Extracted step ID: {step_id} from result: {node}")
         
         if step_id is None:
             logger.error(f"Failed to extract step_id from result: {step_result}")
@@ -162,7 +176,7 @@ class TelemetryNeo4jClient:
         query = """
         MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})-[:PROCESSED]->(s:ProcessingStep {step_name: $step_name})
         SET s.status = $status,
-            s.end_time = CASE WHEN $status != 'started' THEN datetime() ELSE s.end_time END,
+            s.end_time = CASE WHEN $status <> 'started' THEN datetime() ELSE s.end_time END,
             s.data = CASE WHEN $data IS NOT NULL THEN $data ELSE s.data END
         RETURN s
         """
@@ -344,6 +358,7 @@ class TelemetryNeo4jClient:
         
         This should only be used for testing or when requested by an administrator.
         """
+        logger.warning("Clearing all telemetry data from the database")
         # Delete all telemetry nodes and relationships
         clear_query = """
         MATCH (n) 
@@ -360,12 +375,17 @@ class TelemetryNeo4jClient:
         Each dictionary contains the variables returned by the query.
         """
         try:
+            # Debug log for tracking query execution
+            logger.debug(f"Executing Neo4j query: {query[:100]}...")
+            logger.debug(f"Query parameters: {params}")
+            
             async with self.driver.session(database=self.database) as session:
                 result = await session.run(query, params or {})
                 data = await result.data()
                 # Log the query result for debugging
                 if not data:
-                    logger.warning(f"Query returned no results: {query[:100]}...")
+                    logger.warning(f"Query returned no results: {query[:200]}...")
+                    logger.warning(f"Query parameters: {params}")
                 return data
         except Exception as e:
             # Use proper logger instead of print
