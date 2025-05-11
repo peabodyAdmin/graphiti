@@ -20,6 +20,7 @@ if parent_dir not in sys.path:
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, TypedDict, cast
+from services.queue_inspection import get_queue_stats, get_job_by_index
 
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
@@ -631,6 +632,12 @@ async def initialize_graphiti():
         logger.info(
             f'Custom entity extraction: {"enabled" if config.use_custom_entities else "disabled"}'
         )
+        
+        # Initialize queue inspection tools with references to the queues
+        import services.queue_inspection as queue_inspection
+        queue_inspection.episode_queues = episode_queues
+        queue_inspection.telemetry_client = telemetry_client
+        logger.info('Queue inspection tools initialized')
 
     except Exception as e:
         logger.error(f'Failed to initialize Graphiti: {str(e)}')
@@ -1256,6 +1263,11 @@ async def run_mcp_server():
     mcp.tool()(telemetry_episodes_with_error)
     mcp.tool()(telemetry_stats)
     mcp.tool()(telemetry_recent_errors)
+    
+    # Register queue inspection tools
+    logger.info('Registering queue inspection tools')
+    mcp.tool()(get_queue_stats)
+    mcp.tool()(get_job_by_index)
 
     # Get transport config from mcp_config, don't rely on settings object
     transport = mcp_config.transport
@@ -1350,7 +1362,7 @@ async def telemetry_error_patterns() -> TelemetryResponse | ErrorResponse:
         return {"error": "Telemetry system is not enabled"}
         
     try:
-        from mcp_server.telemetry.diagnostic_queries import ERROR_PATTERNS_QUERY
+        from telemetry.diagnostic_queries import ERROR_PATTERNS_QUERY
         
         result = await telemetry_client.run_query(ERROR_PATTERNS_QUERY)
         return {"data": result, "message": "Successfully retrieved error patterns"}
@@ -1372,7 +1384,7 @@ async def telemetry_episodes_with_error(error_type: str) -> TelemetryResponse | 
         return {"error": "Telemetry system is not enabled"}
         
     try:
-        from mcp_server.telemetry.diagnostic_queries import EPISODES_WITH_ERROR_TYPE_QUERY
+        from telemetry.diagnostic_queries import EPISODES_WITH_ERROR_TYPE_QUERY
         
         result = await telemetry_client.run_query(EPISODES_WITH_ERROR_TYPE_QUERY, {"error_type": error_type})
         return {"data": result, "message": f"Successfully retrieved episodes with error type: {error_type}"}
@@ -1422,7 +1434,7 @@ async def telemetry_recent_errors() -> TelemetryResponse | ErrorResponse:
         return {"error": "Telemetry system is not enabled"}
         
     try:
-        from mcp_server.telemetry.diagnostic_queries import RECENT_ERRORS_QUERY
+        from telemetry.diagnostic_queries import RECENT_ERRORS_QUERY
         
         result = await telemetry_client.run_query(RECENT_ERRORS_QUERY)
         return {"data": result, "message": "Successfully retrieved recent errors"}

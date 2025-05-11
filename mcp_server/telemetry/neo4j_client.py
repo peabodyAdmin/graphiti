@@ -398,3 +398,73 @@ class TelemetryNeo4jClient:
     async def close(self):
         """Close the Neo4j driver connection."""
         await self.driver.close()
+    
+    async def get_episode_stats(self, group_id: str) -> Dict[str, Any]:
+        """
+        Get statistics about episodes for a specific client group_id.
+        
+        Args:
+            group_id: The client group_id to get stats for
+            
+        Returns:
+            Dictionary with statistics
+        """
+        query = """
+        MATCH (l:EpisodeProcessingLog {client_group_id: $group_id, group_id: 'graphiti_logs'})
+        RETURN 
+            count(l) as total,
+            sum(CASE WHEN l.status = 'started' THEN 1 ELSE 0 END) as in_progress,
+            sum(CASE WHEN l.status = 'completed' THEN 1 ELSE 0 END) as completed,
+            sum(CASE WHEN l.status = 'failed' THEN 1 ELSE 0 END) as failed
+        """
+        params = {"group_id": group_id}
+        
+        result = await self.run_query(query, params)
+        if result and len(result) > 0:
+            return {
+                "total_episodes": result[0]['total'],
+                "in_progress": result[0]['in_progress'],
+                "completed": result[0]['completed'],
+                "failed": result[0]['failed']
+            }
+        return {}
+    
+    async def get_episode_info(self, episode_id: str) -> Dict[str, Any]:
+        """
+        Get detailed information about a specific episode.
+        
+        Args:
+            episode_id: ID of the episode to retrieve
+            
+        Returns:
+            Dictionary with episode information and processing steps
+        """
+        # Query for episode info
+        query = """
+        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        OPTIONAL MATCH (l)-[:PROCESSED]->(s:ProcessingStep)
+        RETURN l, collect(s) as steps
+        """
+        params = {"episode_id": episode_id}
+        
+        result = await self.run_query(query, params)
+        if not result or len(result) == 0:
+            return {}
+            
+        episode_data = dict(result[0]['l'])
+        steps_data = [dict(s) for s in result[0]['steps']]
+        
+        # Format datetime objects to strings
+        for key in episode_data:
+            if isinstance(episode_data[key], datetime):
+                episode_data[key] = episode_data[key].isoformat()
+                
+        for step in steps_data:
+            for key in step:
+                if isinstance(step[key], datetime):
+                    step[key] = step[key].isoformat()
+        
+        return {
+            "info": episode_data,
+            "steps": steps_data
+        }
