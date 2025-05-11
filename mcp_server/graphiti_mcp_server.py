@@ -1352,12 +1352,23 @@ async def telemetry_stats() -> TelemetryResponse | ErrorResponse:
         return {"error": "Telemetry system is not enabled"}
         
     try:
-        from mcp_server.telemetry.diagnostic_queries import PROCESSING_STATS_QUERY
-        
-        result = await telemetry_client.run_query(PROCESSING_STATS_QUERY)
-        stats = result[0] if result else {"no_data": True}
+        # Use the improved telemetry client method instead of raw query
+        stats = await telemetry_client.get_telemetry_stats()
+        if not stats:
+            stats = {
+                "total_episodes": 0,
+                "completed": 0,
+                "failed": 0,
+                "in_progress": 0,
+                "avg_processing_time_ms": 0,
+                "total_errors": 0,
+                "success_rate": 0,
+                "no_data": True
+            }
         return {"data": stats, "message": "Successfully retrieved processing statistics"}
     except Exception as e:
+        logger.error(f"Failed to retrieve telemetry stats: {str(e)}")
+        logger.error(traceback.format_exc())
         return {"error": f"Failed to retrieve processing statistics: {str(e)}"}
 
 
