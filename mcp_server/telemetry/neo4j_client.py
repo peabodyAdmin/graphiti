@@ -20,7 +20,43 @@ class TelemetryNeo4jClient:
         """Initialize the telemetry client with Neo4j connection details."""
         self.driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
         self.database = database
+        self.initialization_verified = False
+        # Log connection details (without password)
+        logger.info(f"Initialized Neo4j telemetry client: URI={uri}, Database={database}")
+        
+
     
+    async def verify_connection(self):
+        """Verify that we can connect to the database and write data."""
+        logger.info("Testing Neo4j connection and write capabilities...")
+        test_id = f"test_{int(datetime.utcnow().timestamp())}"
+        test_query = """
+        CREATE (t:TelemetryTest {test_id: $test_id, timestamp: datetime()})
+        RETURN t
+        """
+        
+        try:
+            result = await self.run_query(test_query, {"test_id": test_id})
+            if result and len(result) > 0:
+                logger.info(f"Successfully wrote test node to Neo4j with ID: {test_id}")
+                
+                # Clean up test node
+                cleanup_query = "MATCH (t:TelemetryTest {test_id: $test_id}) DELETE t"
+                await self.run_query(cleanup_query, {"test_id": test_id})
+                self.initialization_verified = True
+                return True
+            else:
+                logger.error("Could not verify Neo4j write capability - no results returned")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to verify Neo4j connection: {str(e)}")
+            return False
+
+    async def ensure_verified(self):
+        """Ensure that the connection has been verified at least once."""
+        if not self.initialization_verified:
+            await self.verify_connection()
+            
     async def record_episode_start(self, episode_id: str, original_name: str, group_id: str):
         """Record the start of episode processing.
         
@@ -31,6 +67,8 @@ class TelemetryNeo4jClient:
         
         Note: All telemetry is stored under group_id='graphiti_logs' regardless of client group_id
         """
+        # Ensure DB connectivity is verified
+        await self.ensure_verified()
         # Use MERGE instead of CREATE to prevent duplicate records
         query = """
         MERGE (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
@@ -46,7 +84,46 @@ class TelemetryNeo4jClient:
         RETURN l
         """
         params = {"episode_id": episode_id, "original_name": original_name, "client_group_id": group_id}
-        return await self.run_query(query, params)
+        result = await self.run_query(query, params)
+        
+        # Create EpisodeTracking node for this processing attempt
+        tracking_query = """
+        CREATE (t:EpisodeTracking {
+            episode_id: $episode_id,
+            original_name: $original_name,
+            client_group_id: $client_group_id,
+            tracking_id: $tracking_id,
+            attempt_number: $attempt_number,
+            created_at: datetime(),
+            status: 'in_progress',
+            group_id: 'graphiti_logs'
+        })
+        WITH t
+        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        MERGE (l)-[r:TRACKED_BY]->(t)
+        RETURN t
+        """
+        
+        # Generate a unique tracking ID
+        import uuid
+        tracking_id = f"track_{uuid.uuid4().hex}"
+        attempt_number = result[0]['l'].get('attempt_count') if result and len(result) > 0 and 'l' in result[0] else 1
+        
+        tracking_params = {
+            "episode_id": episode_id,
+            "original_name": original_name,
+            "client_group_id": group_id,
+            "tracking_id": tracking_id,
+            "attempt_number": attempt_number
+        }
+        
+        try:
+            tracking_result = await self.run_query(tracking_query, tracking_params)
+            logger.info(f"Created EpisodeTracking node {tracking_id} for episode {episode_id} (attempt {attempt_number})")
+        except Exception as e:
+            logger.error(f"Failed to create EpisodeTracking node for {episode_id}: {str(e)}")
+        
+        return result
     
     async def record_episode_completion(self, episode_id: str, status: str):
         """Record the completion of episode processing.
@@ -55,18 +132,81 @@ class TelemetryNeo4jClient:
             episode_id: Unique identifier for the episode
             status: Status to set ('completed' or 'failed')
         """
+        # Ensure DB connectivity is verified
+        await self.ensure_verified()
+        
+        # 1. First update the episode log with completion status and calculate processing time
         query = """
         MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
         SET l.status = $status, 
             l.end_time = datetime(),
             l.processing_time_ms = duration.between(l.start_time, datetime()).milliseconds
-        RETURN l
+        RETURN l, l.processing_time_ms as processing_time_ms
         """
         params = {"episode_id": episode_id, "status": status}
         result = await self.run_query(query, params)
         
         if not result:
             logger.warning(f"No episode found with id {episode_id} when trying to record completion")
+            return None
+            
+        # 2. Create a separate EpisodeTiming node for better analytics
+        try:
+            processing_time_ms = result[0].get('processing_time_ms')
+            timing_query = """
+            CREATE (t:EpisodeTiming {
+                episode_id: $episode_id,
+                processing_time_ms: $processing_time_ms,
+                status: $status,
+                recorded_at: datetime(),
+                group_id: 'graphiti_logs'
+            })
+            WITH t
+            MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+            MERGE (l)-[r:HAS_TIMING]->(t)
+            RETURN t
+            """
+            timing_params = {
+                "episode_id": episode_id, 
+                "processing_time_ms": processing_time_ms,
+                "status": status
+            }
+            await self.run_query(timing_query, timing_params)
+            logger.info(f"Created EpisodeTiming node for {episode_id} with processing time {processing_time_ms}ms")
+            
+            # 3. Create relationships between steps to show processing sequence
+            steps_query = """
+            MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})-[:PROCESSED]->(steps:ProcessingStep)
+            WITH steps ORDER BY steps.start_time ASC
+            WITH collect(steps) as ordered_steps
+            UNWIND range(0, size(ordered_steps) - 2) as i
+            WITH ordered_steps[i] as current, ordered_steps[i+1] as next
+            MERGE (current)-[r:FOLLOWED_BY]->(next)
+            RETURN count(r) as relationships_created
+            """
+            steps_result = await self.run_query(steps_query, {"episode_id": episode_id})
+            if steps_result and len(steps_result) > 0 and 'relationships_created' in steps_result[0]:
+                logger.info(f"Created {steps_result[0]['relationships_created']} step sequence relationships for {episode_id}")
+            
+            # 4. Update EpisodeTracking nodes for this episode
+            tracking_update_query = """
+            MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})-[:TRACKED_BY]->(t:EpisodeTracking)
+            WHERE t.status = 'in_progress'
+            SET t.status = $status,
+                t.completed_at = datetime(),
+                t.processing_time_ms = $processing_time_ms
+            RETURN t
+            """
+            tracking_params = {
+                "episode_id": episode_id,
+                "status": status,
+                "processing_time_ms": processing_time_ms
+            }
+            tracking_update_result = await self.run_query(tracking_update_query, tracking_params)
+            logger.info(f"Updated EpisodeTracking for {episode_id} with status {status} and processing time {processing_time_ms}ms")
+            
+        except Exception as e:
+            logger.error(f"Error creating timing analytics for {episode_id}: {str(e)}")
             
         return result
     
@@ -80,6 +220,8 @@ class TelemetryNeo4jClient:
         Returns:
             The result of the query or None if it failed
         """
+        # Ensure DB connectivity is verified
+        await self.ensure_verified()
         try:
             # Use MERGE instead of CREATE to ensure idempotency
             query = """
@@ -110,6 +252,8 @@ class TelemetryNeo4jClient:
         Returns:
             The result of the query or None if it failed
         """
+        # Ensure DB connectivity is verified
+        await self.ensure_verified()
         logger.info(f"Recording processing step for episode {episode_id}: {step_name} - {status}")
         # Ensure the episode exists - create it if it doesn't
         check_episode_query = """
@@ -433,6 +577,10 @@ class TelemetryNeo4jClient:
         Returns the query results as a list of dictionaries, or None if an error occurred.
         Each dictionary contains the variables returned by the query.
         """
+        # Critical debugging - print the exact query and params to help identify issues
+        # Truncate long queries for readability
+        query_excerpt = query[:200] + "..." if len(query) > 200 else query
+        logger.info(f"\nEXECUTING QUERY:\n{query_excerpt}\nPARAMS: {params}\n")
         try:
             # Debug log for tracking query execution
             logger.debug(f"Executing Neo4j query: {query[:100]}...")
@@ -442,22 +590,45 @@ class TelemetryNeo4jClient:
                 # Use explicit transaction for proper commit/rollback handling
                 is_write_query = any(keyword in query.upper() for keyword in ['CREATE', 'MERGE', 'SET', 'DELETE', 'REMOVE', 'FOREACH'])
                 
-                if is_write_query:
-                    # Properly handle transaction by collecting results within the transaction function
-                    async def run_in_tx(tx):
+                # This is the key change: ensure all queries use the same transaction pattern
+                # for maximum reliability
+                async def run_tx(tx):
+                    try:
+                        tx_type = "write" if is_write_query else "read"
+                        logger.info(f"Executing {tx_type} transaction: {query[:100]}...")
+                        
+                        # Run the query
                         result = await tx.run(query, params or {})
+                        
                         # Must collect data before transaction closes
-                        return await result.data()
-                    
-                    # Execute in transaction and return collected data
-                    data = await session.execute_write(run_in_tx)
+                        records = await result.data()
+                        
+                        # Get summary after collecting records
+                        summary = await result.consume()
+                        logger.info(f"Transaction summary - counters: {summary.counters}")
+                        
+                        # Log the specific changes made
+                        if is_write_query and summary.counters:
+                            changes = vars(summary.counters)
+                            changes_str = ', '.join([f"{k}: {v}" for k, v in changes.items() if v > 0])
+                            logger.info(f"Database changes: {changes_str}")
+                        
+                        return records
+                    except Exception as inner_e:
+                        logger.error(f"Error in {tx_type} transaction: {str(inner_e)}")
+                        logger.error(f"Query: {query}")
+                        logger.error(f"Params: {params}")
+                        raise  # Re-raise to ensure transaction is rolled back
+                
+                # Execute appropriate transaction type but use same handler
+                if is_write_query:
+                    logger.info("Starting write transaction execution")
+                    data = await session.execute_write(run_tx)
+                    logger.info("Write transaction committed successfully")
                 else:
-                    # For read-only operations
-                    async def run_read_tx(tx):
-                        result = await tx.run(query, params or {})
-                        return await result.data()
-                    
-                    data = await session.execute_read(run_read_tx)
+                    logger.info(f"Starting read transaction on database: {self.database}")
+                    data = await session.execute_read(run_tx)
+                    logger.info("Read transaction completed successfully")
                 
                 # Log if no results found
                 if not data:
