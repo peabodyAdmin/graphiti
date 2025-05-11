@@ -16,6 +16,7 @@ limitations under the License.
 
 import logging
 import os
+from pathlib import Path
 log_level_env = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, log_level_env, logging.INFO),
@@ -90,7 +91,9 @@ from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entit
 
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+# Load environment variables from the project root .env file
+project_root = Path(__file__).parent.parent.absolute()
+load_dotenv(dotenv_path=os.path.join(project_root, ".env"))
 
 
 class AddEpisodeResults(BaseModel):

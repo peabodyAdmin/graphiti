@@ -7,9 +7,11 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import sys
-import uuid
+import traceback
 from pathlib import Path
+import uuid
 
 # Add the parent directory to Python's module path so imports like 'mcp_server.xyz' work
 parent_dir = str(Path(__file__).parent.parent)
@@ -41,11 +43,13 @@ from graphiti_core.search.search_config_recipes import (
 )
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
-from mcp_server.telemetry.config import TelemetryConfig
-from mcp_server.telemetry.initialization import initialize_telemetry
-from mcp_server.telemetry.shared import telemetry_client as shared_telemetry_client
+from telemetry.config import TelemetryConfig
+from telemetry.initialization import initialize_telemetry
+from telemetry.shared import telemetry_client as shared_telemetry_client
 
-load_dotenv()
+# Load environment variables from the project root .env file
+project_root = Path(__file__).parent.parent.absolute()
+load_dotenv(dotenv_path=os.path.join(project_root, ".env"))
 
 DEFAULT_LLM_MODEL = 'gpt-4.1-mini'
 DEFAULT_EMBEDDER_MODEL = 'text-embedding-3-small'
@@ -683,12 +687,12 @@ async def process_episode_queue(group_id: str):
                 # Process the episode using our telemetry-enabled processor
                 from mcp_server.services.episode_processor import process_episode_queue as process_with_telemetry
                 
-                # Create clients object from our global graphiti client
-                clients = graphiti_client.clients
+                # Pass the full graphiti_client object
+                # This is needed because the add_episode methods exist on the Graphiti class, not on clients
                 
                 # Process the episode with telemetry
                 await process_with_telemetry(
-                    clients=clients,
+                    clients=graphiti_client,
                     telemetry_client=telemetry_client,
                     group_id=group_id,
                     episode_data=episode_data

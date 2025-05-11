@@ -3,12 +3,15 @@ Neo4j client for telemetry, bypassing Graphiti but using same connection details
 """
 
 import json
+import logging
 import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from neo4j import AsyncGraphDatabase
 from neo4j.graph import Node, Relationship
+
+logger = logging.getLogger(__name__)
 
 class TelemetryNeo4jClient:
     """Direct Neo4j client for telemetry, bypassing Graphiti but using same connection details."""
@@ -74,7 +77,21 @@ class TelemetryNeo4jClient:
         CREATE (l)-[r:PROCESSED]->(s)
         RETURN r
         """
-        relate_params = {"episode_id": episode_id, "step_id": step_result[0]['s'].id}
+        # Extract the node ID from the dictionary result
+        step_id = None
+        if step_result and len(step_result) > 0 and 's' in step_result[0]:
+            # Node ID is stored in elementId property for Neo4j 4.0+
+            if isinstance(step_result[0]['s'], dict) and 'elementId' in step_result[0]['s']:
+                step_id = step_result[0]['s']['elementId']
+            # Fallback to 'identity' property for older Neo4j versions
+            elif isinstance(step_result[0]['s'], dict) and 'identity' in step_result[0]['s']:
+                step_id = step_result[0]['s']['identity']
+        
+        if step_id is None:
+            logger.error(f"Failed to extract step_id from result: {step_result}")
+            return None
+            
+        relate_params = {"episode_id": episode_id, "step_id": step_id}
         return await self.run_query(relate_query, relate_params)
     
     async def update_processing_step(self, episode_id: str, step_name: str, status: str, data: Optional[Dict[str, Any]] = None):
@@ -129,10 +146,25 @@ class TelemetryNeo4jClient:
         }]->(e)
         RETURN r
         """
+        
+        # Extract the node ID from the dictionary result
+        error_id = None
+        if error_result and len(error_result) > 0 and 'e' in error_result[0]:
+            # Node ID is stored in elementId property for Neo4j 4.0+
+            if isinstance(error_result[0]['e'], dict) and 'elementId' in error_result[0]['e']:
+                error_id = error_result[0]['e']['elementId']
+            # Fallback to 'identity' property for older Neo4j versions
+            elif isinstance(error_result[0]['e'], dict) and 'identity' in error_result[0]['e']:
+                error_id = error_result[0]['e']['identity']
+        
+        if error_id is None:
+            logger.error(f"Failed to extract error_id from result: {error_result}")
+            return None
+        
         relate_params = {
             "episode_id": episode_id,
             "step_name": step_name,
-            "error_id": error_result[0]['e'].id,
+            "error_id": error_id,
             "affected_entity": context.get("affected_entity", "") if context else "",
             "error_context": context_str
         }
@@ -158,14 +190,25 @@ class TelemetryNeo4jClient:
         return await self.run_query(query, params)
     
     async def run_query(self, query: str, params: Optional[Dict[str, Any]] = None):
-        """Run a Cypher query against Neo4j."""
+        """Run a Cypher query against Neo4j.
+        
+        Returns the query results as a list of dictionaries, or None if an error occurred.
+        Each dictionary contains the variables returned by the query.
+        """
         try:
             async with self.driver.session(database=self.database) as session:
                 result = await session.run(query, params or {})
-                return await result.data()
+                data = await result.data()
+                # Log the query result for debugging
+                if not data:
+                    logger.warning(f"Query returned no results: {query[:100]}...")
+                return data
         except Exception as e:
-            print(f"Error executing query: {str(e)}")
-            print(traceback.format_exc())
+            # Use proper logger instead of print
+            logger.error(f"Error executing query: {str(e)}")
+            logger.error(f"Query: {query[:200]}...")
+            logger.error(f"Params: {params}")
+            logger.error(traceback.format_exc())
             return None
     
     async def close(self):

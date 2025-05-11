@@ -18,13 +18,16 @@ import asyncio
 import os
 from collections.abc import Coroutine
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 from dotenv import load_dotenv
 from neo4j import time as neo4j_time
 from typing_extensions import LiteralString
 
-load_dotenv()
+# Load environment variables from the project root .env file
+project_root = Path(__file__).parent.parent.absolute()
+load_dotenv(dotenv_path=os.path.join(project_root, ".env"))
 
 DEFAULT_DATABASE = os.getenv('DEFAULT_DATABASE', None)
 USE_PARALLEL_RUNTIME = bool(os.getenv('USE_PARALLEL_RUNTIME', False))

@@ -3,9 +3,9 @@ Telemetry initialization utilities.
 """
 
 import logging
-from mcp_server.telemetry.config import TelemetryConfig
-from mcp_server.telemetry.neo4j_client import TelemetryNeo4jClient
-from mcp_server.telemetry.schema_setup import setup_telemetry_schema
+from .config import TelemetryConfig
+from .neo4j_client import TelemetryNeo4jClient
+from .schema_setup import setup_telemetry_schema
 
 logger = logging.getLogger(__name__)
 

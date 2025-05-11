@@ -7,13 +7,13 @@ import logging
 import traceback
 from typing import Any, Dict, Optional
 
-from graphiti_core.graphiti_types import GraphitiClients
+from graphiti_core.graphiti import Graphiti
 from mcp_server.telemetry.neo4j_client import TelemetryNeo4jClient
 
 logger = logging.getLogger(__name__)
 
 async def process_episode_queue(
-    clients: GraphitiClients, 
+    clients: Graphiti, 
     telemetry_client: Optional[TelemetryNeo4jClient], 
     group_id: str, 
     episode_data: Dict[str, Any]
@@ -54,14 +54,14 @@ async def process_episode_queue(
             # Call the appropriate add_episode method based on whether we have bulk data
             if isinstance(episode_data.get("episode_body"), list):
                 # This is a bulk operation
-                await clients.graphiti.add_episode_bulk(
+                await clients.add_episode_bulk(
                     bulk_episodes=episode_data["episode_body"],
                     group_id=group_id,
                     telemetry_client=telemetry_client
                 )
             else:
                 # This is a single episode operation
-                await clients.graphiti.add_episode(
+                await clients.add_episode(
                     name=episode_data["name"],
                     episode_body=episode_data["episode_body"],
                     source_description=episode_data.get("source_description", ""),
