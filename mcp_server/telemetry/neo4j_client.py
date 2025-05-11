@@ -16,16 +16,48 @@ logger = logging.getLogger(__name__)
 class TelemetryNeo4jClient:
     """Direct Neo4j client for telemetry, bypassing Graphiti but using same connection details."""
     
-    def __init__(self, uri: str, user: str, password: str, database: str = "neo4j"):
-        """Initialize the telemetry client with Neo4j connection details."""
-        self.driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+    # Constants
+    TELEMETRY_GROUP_ID = 'graphiti_logs'
+    CONTENT_GROUP_ID = 'graphiti'
+    
+    def __init__(self, neo4j_uri: str, auth: Tuple[str, str], database: str = "neo4j", group_id: str = None):
+        """Initialize the Neo4j Client for telemetry
+        
+        Args:
+            neo4j_uri: URI for Neo4j server connection
+            auth: Tuple of (username, password) for authentication
+            database: Neo4j database name to use
+            group_id: Group ID to use for telemetry nodes, or None to be group agnostic
+        """
+        self.uri = neo4j_uri
+        self.auth = auth
         self.database = database
+        self.driver = AsyncGraphDatabase.driver(self.uri, auth=self.auth)
         self.initialization_verified = False
+        
+        # Make group_id configurable - this allows for more flexible telemetry queries
+        # If None, the client will search across all groups
+        self.group_id = group_id
         # Log connection details (without password)
-        logger.info(f"Initialized Neo4j telemetry client: URI={uri}, Database={database}")
+        logger.info(f"Initialized Neo4j telemetry client: URI={neo4j_uri}, Database={database}")
         
 
     
+    def _get_group_filter(self, include_group_id=True):
+        """Get the appropriate group filter based on configured group_id
+        
+        Args:
+            include_group_id: Whether to include group_id in filter
+            
+        Returns:
+            Dict of parameters to include in query params, and string for cypher WHERE clause
+        """
+        # For telemetry, we always want to use 'graphiti_logs' as the group_id
+        if not include_group_id:
+            return {}, ""
+        else:
+            return {"group_id": self.TELEMETRY_GROUP_ID}, f"group_id: '{self.TELEMETRY_GROUP_ID}'"
+            
     async def verify_connection(self):
         """Verify that we can connect to the database and write data."""
         logger.info("Testing Neo4j connection and write capabilities...")
@@ -660,7 +692,7 @@ class TelemetryNeo4jClient:
             Dictionary with statistics
         """
         query = """
-        MATCH (l:EpisodeProcessingLog {client_group_id: $group_id, group_id: 'graphiti_logs'})
+        MATCH (l:EpisodeProcessingLog {client_group_id: $group_id})
         RETURN 
             count(l) as total,
             sum(CASE WHEN l.status = 'started' THEN 1 ELSE 0 END) as in_progress,
@@ -689,32 +721,219 @@ class TelemetryNeo4jClient:
         Returns:
             Dictionary with episode information and processing steps
         """
-        # Query for episode info
-        query = """
-        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        # Build flexible query with or without group_id filter
+        group_params, group_filter = self._get_group_filter(include_group_id=True)
+        
+        # If group filter is set, include it in the query
+        filter_clause = f", {group_filter}" if group_filter else ""
+        
+        query = f"""
+        MATCH (l:EpisodeProcessingLog {{episode_id: $episode_id{filter_clause}}})
         OPTIONAL MATCH (l)-[:PROCESSED]->(s:ProcessingStep)
-        RETURN l, collect(s) as steps
+        OPTIONAL MATCH (l)-[:TRACKED_BY]->(t:EpisodeTracking)
+        OPTIONAL MATCH (l)-[:HAS_TIMING]->(timing:EpisodeTiming)
+        RETURN l, collect(DISTINCT s) as steps, collect(DISTINCT t) as tracking, collect(DISTINCT timing) as timing_data
         """
+        
+        # Merge the episode ID with any group params
         params = {"episode_id": episode_id}
+        params.update(group_params)
         
         result = await self.run_query(query, params)
         if not result or len(result) == 0:
             return {}
             
         episode_data = dict(result[0]['l'])
-        steps_data = [dict(s) for s in result[0]['steps']]
+        steps_data = [dict(s) for s in result[0]['steps'] if s is not None]
         
-        # Format datetime objects to strings
+        # Process tracking data
+        tracking_data = [dict(t) for t in result[0]['tracking'] if t is not None]
+        
+        # Process timing data
+        timing_data = [dict(t) for t in result[0]['timing_data'] if t is not None]
+        
+        # Format datetime objects to strings in all data structures
         for key in episode_data:
             if isinstance(episode_data[key], datetime):
                 episode_data[key] = episode_data[key].isoformat()
                 
+        # Format datetime objects in steps data
         for step in steps_data:
             for key in step:
                 if isinstance(step[key], datetime):
                     step[key] = step[key].isoformat()
-        
+                    
+        # Format datetime objects in tracking data
+        for track in tracking_data:
+            for key in track:
+                if isinstance(track[key], datetime):
+                    track[key] = track[key].isoformat()
+                    
+        # Format datetime objects in timing data
+        for timing in timing_data:
+            for key in timing:
+                if isinstance(timing[key], datetime):
+                    timing[key] = timing[key].isoformat()
+                
+        # Return a complete telemetry picture
         return {
-            "info": episode_data,
-            "steps": steps_data
+            "episode": episode_data,
+            "steps": steps_data,
+            "tracking": tracking_data,
+            "timing": timing_data
         }
+        
+    async def find_failed_episodes(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Find episodes that failed processing.
+        
+        Args:
+            limit: Maximum number of failed episodes to return
+            
+        Returns:
+            List of dictionaries with episode information
+        """
+        query = f"""
+        MATCH (l:EpisodeProcessingLog {{status: 'failed', group_id: '{self.TELEMETRY_GROUP_ID}'}})
+        OPTIONAL MATCH (l)-[:PROCESSED]->(:ProcessingStep)-[:GENERATED_ERROR]->(e:ProcessingError)
+        RETURN DISTINCT l.episode_id as episode_id, l.original_name as name, 
+               l.processing_time_ms as processing_time_ms, count(e) as error_count
+        ORDER BY l.start_time DESC
+        LIMIT $limit
+        """
+        
+        params = {"limit": limit}
+        result = await self.run_query(query, params)
+        
+        if not result:
+            return []
+            
+        return [dict(r) for r in result]
+    
+    async def find_episode_by_name_or_id(self, search_term: str) -> Dict[str, Any]:
+        """Find telemetry for an episode using a name, title, or ID string.
+        
+        This method is especially useful for finding failed episodes that don't have
+        corresponding content nodes.
+        
+        Args:
+            search_term: Any identifier string - could be an episode name, title, or UUID
+            
+        Returns:
+            Dictionary with telemetry information or empty dict if not found
+        """
+        # First try exact match on episode_id or original_name
+        query = f"""
+        MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
+        WHERE l.episode_id = $search_term OR l.original_name = $search_term
+        RETURN l.episode_id as episode_id LIMIT 1
+        """
+        
+        params = {"search_term": search_term}
+        result = await self.run_query(query, params)
+        
+        if result and len(result) > 0 and result[0].get('episode_id'):
+            return await self.get_episode_info(result[0]['episode_id'])
+            
+        # If exact match fails, try contains
+        fuzzy_query = f"""
+        MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
+        WHERE l.episode_id CONTAINS $search_term OR l.original_name CONTAINS $search_term
+        RETURN l.episode_id as episode_id, l.original_name as name
+        ORDER BY size(l.episode_id) ASC
+        LIMIT 1
+        """
+        
+        fuzzy_result = await self.run_query(fuzzy_query, params)
+        if fuzzy_result and len(fuzzy_result) > 0 and fuzzy_result[0].get('episode_id'):
+            return await self.get_episode_info(fuzzy_result[0]['episode_id'])
+            
+        return {}
+    
+    async def find_telemetry_for_content_uuid(self, content_uuid: str) -> Dict[str, Any]:
+        """Find telemetry information for a content UUID from the graphiti database.
+        
+        This method bridges the gap between content nodes (which use UUIDs) and telemetry nodes
+        (which typically use episode titles or other identifiers).
+        
+        Args:
+            content_uuid: UUID of the content node in the graphiti database
+            
+        Returns:
+            Dictionary with telemetry information or empty dict if not found
+        """
+        # First attempt to find any metadata relationship from the content node to telemetry
+        query = f"""
+        MATCH (c {{uuid: $content_uuid, group_id: '{self.CONTENT_GROUP_ID}'}})
+        OPTIONAL MATCH (c)-[:HAS_METADATA]->(m)
+        RETURN c.title as title, c.name as name, c.original_title as original_title,
+               m.episode_id as episode_id, m.telemetry_id as telemetry_id
+        """
+        params = {"content_uuid": content_uuid}
+        
+        result = await self.run_query(query, params)
+        if not result or len(result) == 0:
+            # If no direct link found, try matching by any known identifiers
+            logger.info(f"No direct telemetry link found for content UUID {content_uuid}, trying to match by title")
+            return await self._find_telemetry_by_content_attributes(content_uuid)
+            
+        # If we have a direct telemetry ID, use it
+        if result[0].get('telemetry_id'):
+            return await self.get_episode_info(result[0]['telemetry_id'])
+            
+        # Try episode_id next
+        if result[0].get('episode_id'):
+            return await self.get_episode_info(result[0]['episode_id'])
+        
+        # Fall back to title-based search
+        for field in ['title', 'name', 'original_title']:
+            if result[0].get(field):
+                telemetry = await self.get_episode_info(result[0][field])
+                if telemetry and telemetry.get('episode'):
+                    return telemetry
+                    
+        # If all else fails, try a fuzzy match
+        return await self._find_telemetry_by_content_attributes(content_uuid)
+        
+    async def _find_telemetry_by_content_attributes(self, content_uuid: str) -> Dict[str, Any]:
+        """Find telemetry by looking at content attributes and matching against telemetry records.
+        
+        Args:
+            content_uuid: UUID of the content in the graphiti database
+            
+        Returns:
+            Dictionary with telemetry information or empty dict if not found
+        """
+        # Get content attributes
+        content_query = f"""
+        MATCH (c {{uuid: $content_uuid, group_id: '{self.CONTENT_GROUP_ID}'}})
+        RETURN c.title as title, c.name as name, labels(c) as labels
+        """
+        params = {"content_uuid": content_uuid}
+        
+        content_result = await self.run_query(content_query, params)
+        if not content_result or len(content_result) == 0:
+            logger.warning(f"Content with UUID {content_uuid} not found")
+            return {}
+            
+        # Extract attributes for matching
+        title = content_result[0].get('title')
+        name = content_result[0].get('name')
+        
+        # Try to find matching telemetry
+        if title or name:
+            search_term = title or name
+            telemetry_query = f"""
+            MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}})
+            WHERE l.original_name = $search_term OR l.episode_id = $search_term
+               OR l.original_name CONTAINS $search_term OR l.episode_id CONTAINS $search_term
+            RETURN l.episode_id as episode_id
+            """
+            
+            telemetry_result = await self.run_query(telemetry_query, {"search_term": search_term})
+            if telemetry_result and len(telemetry_result) > 0 and telemetry_result[0].get('episode_id'):
+                logger.info(f"Found telemetry for content {content_uuid} by matching with {search_term}")
+                return await self.get_episode_info(telemetry_result[0]['episode_id'])
+        
+        # No matching telemetry found
+        logger.info(f"No telemetry found for content UUID {content_uuid}")
+        return {}
