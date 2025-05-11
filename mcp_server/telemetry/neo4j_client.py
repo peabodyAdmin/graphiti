@@ -70,6 +70,34 @@ class TelemetryNeo4jClient:
             
         return result
     
+    async def create_episode_log(self, episode_id: str, status: str = "in_progress"):
+        """Create a new episode log node in the database.
+        
+        Args:
+            episode_id: Unique identifier for the episode
+            status: Initial status for the episode log
+            
+        Returns:
+            The result of the query or None if it failed
+        """
+        try:
+            # Use MERGE instead of CREATE to ensure idempotency
+            query = """
+            MERGE (l:EpisodeProcessingLog {
+                episode_id: $episode_id,
+                group_id: 'graphiti_logs'
+            })
+            ON CREATE SET l.status = $status, 
+                         l.created_at = datetime()
+            RETURN l
+            """
+            params = {"episode_id": episode_id, "status": status}
+            result = await self.run_query(query, params)
+            return result
+        except Exception as e:
+            logger.error(f"Error creating episode log: {e}")
+            return None
+    
     async def record_processing_step(self, episode_id: str, step_name: str, status: str, data: Optional[Dict[str, Any]] = None):
         """Record a processing step for an episode.
         
@@ -83,15 +111,16 @@ class TelemetryNeo4jClient:
             The result of the query or None if it failed
         """
         logger.info(f"Recording processing step for episode {episode_id}: {step_name} - {status}")
-        # First check if the episode exists
+        # Ensure the episode exists - create it if it doesn't
         check_episode_query = """
-        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        MERGE (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        ON CREATE SET l.created_at = datetime(), l.status = 'in_progress'
         RETURN l
         """
         check_result = await self.run_query(check_episode_query, {"episode_id": episode_id})
         
         if not check_result:
-            logger.warning(f"Cannot record step {step_name} for episode {episode_id}: episode not found")
+            logger.error(f"Failed to ensure episode log exists for {episode_id}")
             return None
             
         data_str = json.dumps(data) if data else "{}"
@@ -113,9 +142,16 @@ class TelemetryNeo4jClient:
                 logger.debug(f"Updated existing step {step_name} for episode {episode_id}")
                 return update_result
         
-        # Create new step node
+        # Generate a unique step_id that we can use for matching later
+        import time
+        import uuid
+        # Make sure the step_id is guaranteed unique by using UUID
+        unique_step_id = f"{step_name}_{uuid.uuid4().hex}"
+        
+        # Create new step node with explicit step_id property
         create_step_query = """
         CREATE (s:ProcessingStep {
+            step_id: $step_id,
             step_name: $step_name,
             start_time: CASE WHEN $status = 'started' THEN datetime() ELSE datetime() END,
             end_time: CASE WHEN $status <> 'started' THEN datetime() ELSE null END,
@@ -125,7 +161,7 @@ class TelemetryNeo4jClient:
         })
         RETURN s
         """
-        create_params = {"step_name": step_name, "status": status, "data": data_str}
+        create_params = {"step_id": unique_step_id, "step_name": step_name, "status": status, "data": data_str}
         step_result = await self.run_query(create_step_query, create_params)
         
         if not step_result:
@@ -153,17 +189,40 @@ class TelemetryNeo4jClient:
                 # If we have no ID but have element ID as a function
                 elif hasattr(node, 'element_id') and callable(getattr(node, 'element_id')):
                     step_id = node.element_id()
+                # Generate synthetic ID if all else fails
+                else:
+                    # Use a combination of step_name and timestamp as a synthetic ID
+                    # This will at least let us create relationships even if we can't get the true Neo4j ID
+                    if 'step_name' in node and 'start_time' in node:
+                        step_id = f"{node['step_name']}_{hash(str(node['start_time']))}"
+                        logger.info(f"Using synthetic ID for step: {step_id}")
             logger.debug(f"Extracted step ID: {step_id} from result: {node}")
         
         if step_id is None:
-            logger.error(f"Failed to extract step_id from result: {step_result}")
-            return None
+            logger.warning(f"Failed to extract step_id from result: {step_result}")
+            # Instead of returning None, let's continue with a synthetic ID based on timestamp
+            import time
+            step_id = f"synthetic_{time.time()}"
+            logger.info(f"Using fallback synthetic ID: {step_id}")
+            # Return empty result but don't fail completely
+            return []
             
-        # Create relationship to the episode
+        # Update the step with a unique step_id property we can use for matching
+        update_step_query = """
+        MATCH (s:ProcessingStep) WHERE elementId(s) = $element_id OR s.step_name = $step_name
+        SET s.step_id = $step_id
+        RETURN s
+        """
+        # Try to use elementId if available, otherwise fall back to step_id
+        element_id = step_id if isinstance(step_id, int) else None
+        update_params = {"element_id": element_id, "step_name": step_name, "step_id": step_id}
+        await self.run_query(update_step_query, update_params)
+        
+        # Create relationship to the episode using the step_id property
         relate_query = """
         MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
-        MATCH (s:ProcessingStep) WHERE id(s) = $step_id
-        CREATE (l)-[r:PROCESSED]->(s)
+        MATCH (s:ProcessingStep {step_id: $step_id})
+        MERGE (l)-[r:PROCESSED]->(s)
         RETURN r
         """
         relate_params = {"episode_id": episode_id, "step_id": step_id}
@@ -269,7 +328,7 @@ class TelemetryNeo4jClient:
         if step_exists or check_result:
             relate_query = """
             MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})-[:PROCESSED]->(s:ProcessingStep {step_name: $step_name})
-            MATCH (e:ProcessingError) WHERE id(e) = $error_id
+            MATCH (e:ProcessingError {error_id: $error_id, group_id: 'graphiti_logs'})
             MERGE (s)-[r:GENERATED_ERROR {
                 affected_entity: $affected_entity,
                 error_context: $error_context,
@@ -303,7 +362,7 @@ class TelemetryNeo4jClient:
         """
         query = """
         MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
-        MATCH (e:ProcessingError) WHERE id(e) = $error_id
+        MATCH (e:ProcessingError {error_id: $error_id, group_id: 'graphiti_logs'})
         MERGE (e)-[r:RESOLVED_BY_RETRY {
             retry_attempt: $retry_attempt,
             retry_strategy: $retry_strategy,
@@ -380,12 +439,32 @@ class TelemetryNeo4jClient:
             logger.debug(f"Query parameters: {params}")
             
             async with self.driver.session(database=self.database) as session:
-                result = await session.run(query, params or {})
-                data = await result.data()
-                # Log the query result for debugging
+                # Use explicit transaction for proper commit/rollback handling
+                is_write_query = any(keyword in query.upper() for keyword in ['CREATE', 'MERGE', 'SET', 'DELETE', 'REMOVE', 'FOREACH'])
+                
+                if is_write_query:
+                    # Properly handle transaction by collecting results within the transaction function
+                    async def run_in_tx(tx):
+                        result = await tx.run(query, params or {})
+                        # Must collect data before transaction closes
+                        return await result.data()
+                    
+                    # Execute in transaction and return collected data
+                    data = await session.execute_write(run_in_tx)
+                else:
+                    # For read-only operations
+                    async def run_read_tx(tx):
+                        result = await tx.run(query, params or {})
+                        return await result.data()
+                    
+                    data = await session.execute_read(run_read_tx)
+                
+                # Log if no results found
                 if not data:
                     logger.warning(f"Query returned no results: {query[:200]}...")
                     logger.warning(f"Query parameters: {params}")
+                
+                # Success! Return the data
                 return data
         except Exception as e:
             # Use proper logger instead of print

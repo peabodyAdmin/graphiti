@@ -692,7 +692,7 @@ async def process_episode_queue(group_id: str):
 
             try:
                 # Process the episode using our telemetry-enabled processor
-                from mcp_server.services.episode_processor import process_episode_queue as process_with_telemetry
+                from services.episode_processor import process_episode_queue as process_with_telemetry
                 
                 # Pass the full graphiti_client object
                 # This is needed because the add_episode methods exist on the Graphiti class, not on clients

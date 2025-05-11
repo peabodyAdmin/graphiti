@@ -8,7 +8,7 @@ import traceback
 from typing import Any, Dict, Optional
 
 from graphiti_core.graphiti import Graphiti
-from mcp_server.telemetry.neo4j_client import TelemetryNeo4jClient
+from telemetry.neo4j_client import TelemetryNeo4jClient
 
 logger = logging.getLogger(__name__)
 
