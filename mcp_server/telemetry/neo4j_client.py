@@ -92,11 +92,11 @@ class TelemetryNeo4jClient:
         if not self.initialization_verified:
             await self.verify_connection()
             
-    async def record_episode_start(self, episode_id: str, original_name: str, group_id: str):
+    async def record_episode_start(self, episode_name: str, original_name: str, group_id: str):
         """Record the start of episode processing.
         
         Args:
-            episode_id: Unique identifier for the episode
+            episode_name: Unique identifier for the episode
             original_name: Original name of the episode
             group_id: The client's group_id (used as a reference for client_group_id)
         
@@ -106,7 +106,7 @@ class TelemetryNeo4jClient:
         await self.ensure_verified()
         # Use MERGE instead of CREATE to prevent duplicate records
         query = """
-        MERGE (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        MERGE (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})
         ON CREATE SET 
             l.original_name = $original_name, 
             l.client_group_id = $client_group_id, 
@@ -118,13 +118,13 @@ class TelemetryNeo4jClient:
             l.last_attempt_time = datetime()
         RETURN l
         """
-        params = {"episode_id": episode_id, "original_name": original_name, "client_group_id": group_id}
+        params = {"episode_name": episode_name, "original_name": original_name, "client_group_id": group_id}
         result = await self.run_query(query, params)
         
         # Create EpisodeTracking node for this processing attempt
         tracking_query = """
         CREATE (t:EpisodeTracking {
-            episode_id: $episode_id,
+            episode_name: $episode_name,
             original_name: $original_name,
             client_group_id: $client_group_id,
             tracking_id: $tracking_id,
@@ -134,7 +134,7 @@ class TelemetryNeo4jClient:
             group_id: 'graphiti_logs'
         })
         WITH t
-        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})
         MERGE (l)-[r:TRACKED_BY]->(t)
         RETURN t
         """
@@ -145,7 +145,7 @@ class TelemetryNeo4jClient:
         attempt_number = result[0]['l'].get('attempt_count') if result and len(result) > 0 and 'l' in result[0] else 1
         
         tracking_params = {
-            "episode_id": episode_id,
+            "episode_name": episode_name,
             "original_name": original_name,
             "client_group_id": group_id,
             "tracking_id": tracking_id,
@@ -154,35 +154,40 @@ class TelemetryNeo4jClient:
         
         try:
             tracking_result = await self.run_query(tracking_query, tracking_params)
-            logger.info(f"Created EpisodeTracking node {tracking_id} for episode {episode_id} (attempt {attempt_number})")
+            logger.info(f"Created EpisodeTracking node {tracking_id} for episode {episode_name} (attempt {attempt_number})")
         except Exception as e:
-            logger.error(f"Failed to create EpisodeTracking node for {episode_id}: {str(e)}")
+            logger.error(f"Failed to create EpisodeTracking node for {episode_name}: {str(e)}")
         
         return result
     
-    async def record_episode_completion(self, episode_id: str, status: str):
+    async def record_episode_completion(self, episode_name: str, status: str, episodeElementId: str = None):
         """Record the completion of episode processing.
         
         Args:
-            episode_id: Unique identifier for the episode
+            episode_name: Unique identifier for the episode
             status: Status to set ('completed' or 'failed')
+            episodeElementId: Optional canonical episode element ID (set if ingestion succeeded)
         """
         # Ensure DB connectivity is verified
         await self.ensure_verified()
         
         # 1. First update the episode log with completion status and calculate processing time
         query = """
-        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})
         SET l.status = $status, 
             l.end_time = datetime(),
             l.processing_time_ms = duration.between(l.start_time, datetime()).milliseconds
-        RETURN l, l.processing_time_ms as processing_time_ms
         """
-        params = {"episode_id": episode_id, "status": status}
+        if episodeElementId:
+            query += "    , l.episodeElementId = $episodeElementId\n"
+        query += "RETURN l, l.processing_time_ms as processing_time_ms\n"
+        params = {"episode_name": episode_name, "status": status}
+        if episodeElementId:
+            params["episodeElementId"] = episodeElementId
         result = await self.run_query(query, params)
         
         if not result:
-            logger.warning(f"No episode found with id {episode_id} when trying to record completion")
+            logger.warning(f"No episode found with id {episode_name} when trying to record completion")
             return None
             
         # 2. Create a separate EpisodeTiming node for better analytics
@@ -190,28 +195,28 @@ class TelemetryNeo4jClient:
             processing_time_ms = result[0].get('processing_time_ms')
             timing_query = """
             CREATE (t:EpisodeTiming {
-                episode_id: $episode_id,
+                episode_name: $episode_name,
                 processing_time_ms: $processing_time_ms,
                 status: $status,
                 recorded_at: datetime(),
                 group_id: 'graphiti_logs'
             })
             WITH t
-            MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+            MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})
             MERGE (l)-[r:HAS_TIMING]->(t)
             RETURN t
             """
             timing_params = {
-                "episode_id": episode_id, 
+                "episode_name": episode_name, 
                 "processing_time_ms": processing_time_ms,
                 "status": status
             }
             await self.run_query(timing_query, timing_params)
-            logger.info(f"Created EpisodeTiming node for {episode_id} with processing time {processing_time_ms}ms")
+            logger.info(f"Created EpisodeTiming node for {episode_name} with processing time {processing_time_ms}ms")
             
             # 3. Create relationships between steps to show processing sequence
             steps_query = """
-            MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})-[:PROCESSED]->(steps:ProcessingStep)
+            MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})-[:PROCESSED]->(steps:ProcessingStep)
             WITH steps ORDER BY steps.start_time ASC
             WITH collect(steps) as ordered_steps
             UNWIND range(0, size(ordered_steps) - 2) as i
@@ -219,13 +224,13 @@ class TelemetryNeo4jClient:
             MERGE (current)-[r:FOLLOWED_BY]->(next)
             RETURN count(r) as relationships_created
             """
-            steps_result = await self.run_query(steps_query, {"episode_id": episode_id})
+            steps_result = await self.run_query(steps_query, {"episode_name": episode_name})
             if steps_result and len(steps_result) > 0 and 'relationships_created' in steps_result[0]:
-                logger.info(f"Created {steps_result[0]['relationships_created']} step sequence relationships for {episode_id}")
+                logger.info(f"Created {steps_result[0]['relationships_created']} step sequence relationships for {episode_name}")
             
             # 4. Update EpisodeTracking nodes for this episode
             tracking_update_query = """
-            MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})-[:TRACKED_BY]->(t:EpisodeTracking)
+            MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})-[:TRACKED_BY]->(t:EpisodeTracking)
             WHERE t.status = 'in_progress'
             SET t.status = $status,
                 t.completed_at = datetime(),
@@ -233,23 +238,23 @@ class TelemetryNeo4jClient:
             RETURN t
             """
             tracking_params = {
-                "episode_id": episode_id,
+                "episode_name": episode_name,
                 "status": status,
                 "processing_time_ms": processing_time_ms
             }
             tracking_update_result = await self.run_query(tracking_update_query, tracking_params)
-            logger.info(f"Updated EpisodeTracking for {episode_id} with status {status} and processing time {processing_time_ms}ms")
+            logger.info(f"Updated EpisodeTracking for {episode_name} with status {status} and processing time {processing_time_ms}ms")
             
         except Exception as e:
-            logger.error(f"Error creating timing analytics for {episode_id}: {str(e)}")
+            logger.error(f"Error creating timing analytics for {episode_name}: {str(e)}")
             
         return result
     
-    async def create_episode_log(self, episode_id: str, status: str = "in_progress"):
+    async def create_episode_log(self, episode_name: str, status: str = "in_progress"):
         """Create a new episode log node in the database.
         
         Args:
-            episode_id: Unique identifier for the episode
+            episode_name: Unique identifier for the episode
             status: Initial status for the episode log
             
         Returns:
@@ -261,25 +266,25 @@ class TelemetryNeo4jClient:
             # Use MERGE instead of CREATE to ensure idempotency
             query = """
             MERGE (l:EpisodeProcessingLog {
-                episode_id: $episode_id,
+                episode_name: $episode_name,
                 group_id: 'graphiti_logs'
             })
             ON CREATE SET l.status = $status, 
                          l.created_at = datetime()
             RETURN l
             """
-            params = {"episode_id": episode_id, "status": status}
+            params = {"episode_name": episode_name, "status": status}
             result = await self.run_query(query, params)
             return result
         except Exception as e:
             logger.error(f"Error creating episode log: {e}")
             return None
     
-    async def record_processing_step(self, episode_id: str, step_name: str, status: str, data: Optional[Dict[str, Any]] = None):
+    async def record_processing_step(self, episode_name: str, step_name: str, status: str, data: Optional[Dict[str, Any]] = None):
         """Record a processing step for an episode.
         
         Args:
-            episode_id: Unique identifier for the episode
+            episode_name: Unique identifier for the episode
             step_name: Name of the processing step
             status: Status of the step ('started', 'success', 'error', 'warning')
             data: Optional additional data to store with the step
@@ -289,17 +294,17 @@ class TelemetryNeo4jClient:
         """
         # Ensure DB connectivity is verified
         await self.ensure_verified()
-        logger.info(f"Recording processing step for episode {episode_id}: {step_name} - {status}")
+        logger.info(f"Recording processing step for episode {episode_name}: {step_name} - {status}")
         # Ensure the episode exists - create it if it doesn't
         check_episode_query = """
-        MERGE (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        MERGE (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})
         ON CREATE SET l.created_at = datetime(), l.status = 'in_progress'
         RETURN l
         """
-        check_result = await self.run_query(check_episode_query, {"episode_id": episode_id})
+        check_result = await self.run_query(check_episode_query, {"episode_name": episode_name})
         
         if not check_result:
-            logger.error(f"Failed to ensure episode log exists for {episode_id}")
+            logger.error(f"Failed to ensure episode log exists for {episode_name}")
             return None
             
         data_str = json.dumps(data) if data else "{}"
@@ -308,17 +313,17 @@ class TelemetryNeo4jClient:
         if status != 'started':
             # Try to update existing step first
             update_query = """
-            MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})-[:PROCESSED]->(s:ProcessingStep {step_name: $step_name, status: 'started'})
+            MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})-[:PROCESSED]->(s:ProcessingStep {step_name: $step_name, status: 'started'})
             SET s.status = $status,
                 s.end_time = datetime(),
                 s.data = $data
             RETURN s
             """
-            update_params = {"episode_id": episode_id, "step_name": step_name, "status": status, "data": data_str}
+            update_params = {"episode_name": episode_name, "step_name": step_name, "status": status, "data": data_str}
             update_result = await self.run_query(update_query, update_params)
             
             if update_result and len(update_result) > 0:
-                logger.debug(f"Updated existing step {step_name} for episode {episode_id}")
+                logger.debug(f"Updated existing step {step_name} for episode {episode_name}")
                 return update_result
         
         # Generate a unique step_id that we can use for matching later
@@ -344,7 +349,7 @@ class TelemetryNeo4jClient:
         step_result = await self.run_query(create_step_query, create_params)
         
         if not step_result:
-            logger.error(f"Failed to create processing step {step_name} for episode {episode_id}")
+            logger.error(f"Failed to create processing step {step_name} for episode {episode_name}")
             return None
         
         # Extract the node ID from the dictionary result
@@ -399,34 +404,34 @@ class TelemetryNeo4jClient:
         
         # Create relationship to the episode using the step_id property
         relate_query = """
-        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})
         MATCH (s:ProcessingStep {step_id: $step_id})
         MERGE (l)-[r:PROCESSED]->(s)
         RETURN r
         """
-        relate_params = {"episode_id": episode_id, "step_id": step_id}
+        relate_params = {"episode_name": episode_name, "step_id": step_id}
         return await self.run_query(relate_query, relate_params)
     
-    async def update_processing_step(self, episode_id: str, step_name: str, status: str, data: Optional[Dict[str, Any]] = None):
+    async def update_processing_step(self, episode_name: str, step_name: str, status: str, data: Optional[Dict[str, Any]] = None):
         """Update an existing processing step with new status and data."""
         data_str = json.dumps(data) if data else None
         
         query = """
-        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})-[:PROCESSED]->(s:ProcessingStep {step_name: $step_name})
+        MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})-[:PROCESSED]->(s:ProcessingStep {step_name: $step_name})
         SET s.status = $status,
             s.end_time = CASE WHEN $status <> 'started' THEN datetime() ELSE s.end_time END,
             s.data = CASE WHEN $data IS NOT NULL THEN $data ELSE s.data END
         RETURN s
         """
-        params = {"episode_id": episode_id, "step_name": step_name, "status": status, "data": data_str}
+        params = {"episode_name": episode_name, "step_name": step_name, "status": status, "data": data_str}
         return await self.run_query(query, params)
     
-    async def record_error(self, episode_id: str, step_name: str, error_type: str, error_message: str, 
+    async def record_error(self, episode_name: str, step_name: str, error_type: str, error_message: str, 
                          stack_trace: str, context: Optional[Dict[str, Any]] = None):
         """Record an error that occurred during episode processing.
         
         Args:
-            episode_id: Unique identifier for the episode
+            episode_name: Unique identifier for the episode
             step_name: Name of the processing step where the error occurred
             error_type: Type of error (e.g., 'AttributeError')
             error_message: Error message
@@ -438,26 +443,26 @@ class TelemetryNeo4jClient:
         """
         # First check if the episode exists
         check_episode_query = """
-        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})
         RETURN l
         """
-        check_result = await self.run_query(check_episode_query, {"episode_id": episode_id})
+        check_result = await self.run_query(check_episode_query, {"episode_name": episode_name})
         
         if not check_result:
-            logger.warning(f"Cannot record error for episode {episode_id}: episode not found")
+            logger.warning(f"Cannot record error for episode {episode_name}: episode not found")
             # Still create the error node, but it won't be linked to an episode
             
         # Check if we need to create the processing step first
         step_exists_query = """
-        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})-[:PROCESSED]->(s:ProcessingStep {step_name: $step_name})
+        MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})-[:PROCESSED]->(s:ProcessingStep {step_name: $step_name})
         RETURN s
         """
-        step_exists = await self.run_query(step_exists_query, {"episode_id": episode_id, "step_name": step_name})
+        step_exists = await self.run_query(step_exists_query, {"episode_name": episode_name, "step_name": step_name})
         
         # If step doesn't exist and episode exists, create the step first
         if not step_exists and check_result:
             logger.info(f"Creating missing step {step_name} for error recording")
-            await self.record_processing_step(episode_id, step_name, "error", {"auto_created": True})
+            await self.record_processing_step(episode_name, step_name, "error", {"auto_created": True})
         
         context_str = json.dumps(context) if context else "{}"
         
@@ -472,7 +477,7 @@ class TelemetryNeo4jClient:
             resolution_details: '',
             group_id: 'graphiti_logs',
             created_at: datetime(),
-            episode_id: $episode_id
+            episode_name: $episode_name
         })
         RETURN e
         """
@@ -481,12 +486,12 @@ class TelemetryNeo4jClient:
             "error_message": error_message,
             "stack_trace": stack_trace,
             "context": context_str,
-            "episode_id": episode_id
+            "episode_name": episode_name
         }
         error_result = await self.run_query(create_error_query, error_params)
         
         if not error_result:
-            logger.error(f"Failed to create error record for {episode_id}")
+            logger.error(f"Failed to create error record for {episode_name}")
             return None
         
         # Extract the node ID from the dictionary result
@@ -506,7 +511,7 @@ class TelemetryNeo4jClient:
         # If step exists, create relationship between step and error
         if step_exists or check_result:
             relate_query = """
-            MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})-[:PROCESSED]->(s:ProcessingStep {step_name: $step_name})
+            MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})-[:PROCESSED]->(s:ProcessingStep {step_name: $step_name})
             MATCH (e:ProcessingError {error_id: $error_id, group_id: 'graphiti_logs'})
             MERGE (s)-[r:GENERATED_ERROR {
                 affected_entity: $affected_entity,
@@ -516,7 +521,7 @@ class TelemetryNeo4jClient:
             RETURN r
             """
             relate_params = {
-                "episode_id": episode_id,
+                "episode_name": episode_name,
                 "step_name": step_name,
                 "error_id": error_id,
                 "affected_entity": context.get("affected_entity", "") if context else "",
@@ -527,11 +532,11 @@ class TelemetryNeo4jClient:
         # If we can't create the relationship, at least return the error node
         return error_result
     
-    async def record_retry(self, episode_id: str, error_id: int, retry_attempt: int, retry_strategy: str):
+    async def record_retry(self, episode_name: str, error_id: int, retry_attempt: int, retry_strategy: str):
         """Record a retry attempt for an error.
         
         Args:
-            episode_id: Unique identifier for the episode
+            episode_name: Unique identifier for the episode
             error_id: ID of the error node
             retry_attempt: Count of retry attempts
             retry_strategy: Description of the retry strategy used
@@ -540,7 +545,7 @@ class TelemetryNeo4jClient:
             The result of the query or None if it failed
         """
         query = """
-        MATCH (l:EpisodeProcessingLog {episode_id: $episode_id, group_id: 'graphiti_logs'})
+        MATCH (l:EpisodeProcessingLog {episode_name: $episode_name, group_id: 'graphiti_logs'})
         MATCH (e:ProcessingError {error_id: $error_id, group_id: 'graphiti_logs'})
         MERGE (e)-[r:RESOLVED_BY_RETRY {
             retry_attempt: $retry_attempt,
@@ -551,7 +556,7 @@ class TelemetryNeo4jClient:
         RETURN r
         """
         params = {
-            "episode_id": episode_id,
+            "episode_name": episode_name,
             "error_id": error_id,
             "retry_attempt": retry_attempt,
             "retry_strategy": retry_strategy
@@ -714,11 +719,11 @@ class TelemetryNeo4jClient:
             }
         return {}
     
-    async def get_episode_info(self, episode_identifier: str) -> Dict[str, Any]:
+    async def get_episode_info(self, episode_nameentifier: str) -> Dict[str, Any]:
         """Get detailed information about an episode, including processing steps and errors.
         
         Args:
-            episode_identifier: Either the episode_id property value OR a Neo4j internal ID 
+            episode_nameentifier: Either the episode_name property value OR a Neo4j internal ID 
                               in the format "1105c001-9aca-44df-b787-08a8d10a5d70"
             
         Returns:
@@ -727,21 +732,21 @@ class TelemetryNeo4jClient:
         # Ensure DB connectivity is verified
         await self.ensure_verified()
         
-        # Determine if this is likely a Neo4j elementId (UUID format) or an episode_id property
-        is_neo4j_id = bool(re.match(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', episode_identifier))
+        # Determine if this is likely a Neo4j elementId (UUID format) or an episode_name property
+        is_neo4j_id = bool(re.match(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', episode_nameentifier))
         
-        logger.info(f"Looking up episode with {'Neo4j ID' if is_neo4j_id else 'episode_id'}: {episode_identifier}")
+        logger.info(f"Looking up episode with {'Neo4j ID' if is_neo4j_id else 'episode_name'}: {episode_nameentifier}")
         
         # Construct the appropriate query based on identifier type
         if is_neo4j_id:
             # Handle Neo4j internal ID lookup - extract the UUID portion
-            uuid_parts = episode_identifier.split(':')
+            uuid_parts = episode_nameentifier.split(':')
             if len(uuid_parts) > 1:
                 # If format is like "4:1105c001-9aca-44df-b787-08a8d10a5d70:121", extract the UUID
                 uuid = uuid_parts[1]
             else:
                 # If already just a UUID
-                uuid = episode_identifier
+                uuid = episode_nameentifier
                 
             query = f"""
             MATCH (l) WHERE id(l) = $node_id AND l.group_id = '{self.TELEMETRY_GROUP_ID}'
@@ -751,38 +756,44 @@ class TelemetryNeo4jClient:
             
             logger.info(f"Querying with Neo4j ID parameters: {params}")
         else:
-            # Regular episode_id property lookup
+            # Regular episode_name property lookup
             query = f"""
-            MATCH (l:EpisodeProcessingLog {{episode_id: $episode_id, group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
-            RETURN l as episode
+            MATCH (l:EpisodeProcessingLog {{episode_name: $episode_name, group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
+            OPTIONAL MATCH (l)-[:TRACKED_BY]->(t:EpisodeTracking)
+            OPTIONAL MATCH (l)-[:HAS_TIMING]->(timing:EpisodeTiming)
+            OPTIONAL MATCH (l)-[:PROCESSED]->(s:ProcessingStep)
+            RETURN l as episode, 
+                   collect(distinct t) as tracking,
+                   collect(distinct timing) as timing_data,
+                   collect(distinct s) as steps_data
             """
-            params = {"episode_id": episode_identifier}
+            params = {"episode_name": episode_nameentifier}
         
         result = await self.run_query(query, params)
         
         # If the primary lookup failed, try alternative approaches
         if not result or len(result) == 0:
-            logger.warning(f"Primary lookup failed for {episode_identifier}, trying alternatives")
+            logger.warning(f"Primary lookup failed for {episode_nameentifier}, trying alternatives")
             
             # Try a more generic lookup approach
             fallback_query = f"""
             MATCH (l) 
             WHERE l.group_id = '{self.TELEMETRY_GROUP_ID}' AND
-                  (l.episode_id = $id OR 
+                  (l.episode_name = $id OR 
                    l.original_name = $id OR
                    toString(id(l)) CONTAINS $id_fragment)
             RETURN l as episode LIMIT 1
             """
             
             # Extract a fragment to use for partial matching on Neo4j IDs
-            id_fragment = episode_identifier.split(':')[1] if ':' in episode_identifier else episode_identifier
+            id_fragment = episode_nameentifier.split(':')[1] if ':' in episode_nameentifier else episode_nameentifier
             id_fragment = id_fragment[:8]  # Use first portion for matching
             
-            fallback_params = {"id": episode_identifier, "id_fragment": id_fragment}
+            fallback_params = {"id": episode_nameentifier, "id_fragment": id_fragment}
             result = await self.run_query(fallback_query, fallback_params)
             
             if not result or len(result) == 0:
-                logger.error(f"All lookup attempts failed for {episode_identifier}")
+                logger.error(f"All lookup attempts failed for {episode_nameentifier}")
                 return {}
         
         episode_data = result[0].get('episode', {})
@@ -792,6 +803,9 @@ class TelemetryNeo4jClient:
         
         # Process timing data
         timing_data = [dict(t) for t in result[0]['timing_data'] if t is not None]
+        
+        # Process steps data
+        steps_data = [dict(s) for s in result[0]['steps_data'] if s is not None] if 'steps_data' in result[0] else []
         
         # Format datetime objects to strings in all data structures
         for key in episode_data:
@@ -891,7 +905,7 @@ class TelemetryNeo4jClient:
         query = f"""
         MATCH (l:EpisodeProcessingLog {{status: 'failed', group_id: '{self.TELEMETRY_GROUP_ID}'}})
         OPTIONAL MATCH (l)-[:PROCESSED]->(:ProcessingStep)-[:GENERATED_ERROR]->(e:ProcessingError)
-        RETURN DISTINCT l.episode_id as episode_id, l.original_name as name, 
+        RETURN DISTINCT l.episode_name as episode_name, l.original_name as name, 
                l.processing_time_ms as processing_time_ms, count(e) as error_count
         ORDER BY l.start_time DESC
         LIMIT $limit
@@ -923,7 +937,7 @@ class TelemetryNeo4jClient:
         # More comprehensive diagnostic query to check exactly what's in the database
         diagnostic_query = f"""
         MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
-        RETURN l as full_node, l.episode_id as episode_id, l.original_name as original_name, 
+        RETURN l as full_node, l.episode_name as episode_name, l.original_name as original_name, 
                l.status as status, l.client_group_id as client_group_id,
                l.start_time as start_time, l.end_time as end_time,
                labels(l) as labels
@@ -960,32 +974,32 @@ class TelemetryNeo4jClient:
         query = f"""
         // Exact match (highest priority)
         MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
-        WHERE (l.episode_id = $search_term OR l.original_name = $search_term){client_filter}
+        WHERE (l.episode_name = $search_term OR l.original_name = $search_term){client_filter}
         RETURN l as log, 3 as score
         
         UNION
         
         // String contains match (medium priority)
         MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}})  
-        WHERE (l.episode_id CONTAINS $search_term OR l.original_name CONTAINS $search_term)
-        AND NOT (l.episode_id = $search_term OR l.original_name = $search_term){client_filter}
+        WHERE (l.episode_name CONTAINS $search_term OR l.original_name CONTAINS $search_term)
+        AND NOT (l.episode_name = $search_term OR l.original_name = $search_term){client_filter}
         RETURN l as log, 2 as score
         
         UNION
         
         // Case-insensitive match (lower priority)
         MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}})  
-        WHERE (toLower(l.episode_id) CONTAINS toLower($search_term) OR toLower(l.original_name) CONTAINS toLower($search_term))
-        AND NOT (l.episode_id CONTAINS $search_term OR l.original_name CONTAINS $search_term){client_filter}
+        WHERE (toLower(l.episode_name) CONTAINS toLower($search_term) OR toLower(l.original_name) CONTAINS toLower($search_term))
+        AND NOT (l.episode_name CONTAINS $search_term OR l.original_name CONTAINS $search_term){client_filter}
         RETURN l as log, 1 as score
         
         UNION
         
         // Word boundary match for multi-word titles
         MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}})  
-        WHERE ANY(word IN split(l.episode_id, ' ') WHERE word = $search_term)
+        WHERE ANY(word IN split(l.episode_name, ' ') WHERE word = $search_term)
         OR ANY(word IN split(l.original_name, ' ') WHERE word = $search_term){client_filter}
-        AND NOT (toLower(l.episode_id) CONTAINS toLower($search_term) OR toLower(l.original_name) CONTAINS toLower($search_term))
+        AND NOT (toLower(l.episode_name) CONTAINS toLower($search_term) OR toLower(l.original_name) CONTAINS toLower($search_term))
         RETURN l as log, 0.5 as score
         
         ORDER BY score DESC, l.start_time DESC
@@ -1005,11 +1019,11 @@ class TelemetryNeo4jClient:
             direct_queries = [
                 # Case-insensitive search with CONTAINS
                 f"""MATCH (l) WHERE l.group_id = '{self.TELEMETRY_GROUP_ID}' 
-                    AND (toLower(toString(l.episode_id)) CONTAINS toLower('forgotten') 
+                    AND (toLower(toString(l.episode_name)) CONTAINS toLower('forgotten') 
                     OR toLower(toString(l.original_name)) CONTAINS toLower('forgotten'))
                 RETURN l""",
                 # Look for exact matches of the example we know exists
-                """MATCH (l) WHERE l.episode_id = 'Novel Story: The Forgotten Atlas' 
+                """MATCH (l) WHERE l.episode_name = 'Novel Story: The Forgotten Atlas' 
                    RETURN l""",
                 # Try matching any node with properties that might contain our search term
                 """MATCH (l) 
@@ -1027,7 +1041,7 @@ class TelemetryNeo4jClient:
                     if i == 0:
                         # Case-insensitive CONTAINS was successful
                         recovery_query = f"""MATCH (l) WHERE l.group_id = '{self.TELEMETRY_GROUP_ID}' 
-                            AND (toLower(toString(l.episode_id)) CONTAINS toLower($search_term) 
+                            AND (toLower(toString(l.episode_name)) CONTAINS toLower($search_term) 
                             OR toLower(toString(l.original_name)) CONTAINS toLower($search_term))
                         RETURN l as log, 2 as score"""
                         recovery_result = await self.run_query(recovery_query, {"search_term": search_term})
@@ -1042,13 +1056,13 @@ class TelemetryNeo4jClient:
         # Get detailed info for each match
         matches = []
         for match in result:
-            if not match.get('log') or not match['log'].get('episode_id'):
-                logger.warning(f"Invalid match result missing log or episode_id: {match}")
+            if not match.get('log') or not match['log'].get('episode_name'):
+                logger.warning(f"Invalid match result missing log or episode_name: {match}")
                 continue
             
-            episode_id = match['log']['episode_id']
-            logger.info(f"Getting detailed info for episode: {episode_id}")
-            detailed_info = await self.get_episode_info(episode_id)
+            episode_name = match['log']['episode_name']
+            logger.info(f"Getting detailed info for episode: {episode_name}")
+            detailed_info = await self.get_episode_info(episode_name)
             
             if detailed_info:
                 # Add score and relevance info
@@ -1065,7 +1079,7 @@ class TelemetryNeo4jClient:
                     detailed_info['episode']['match_relevance'] = relevance
                 matches.append(detailed_info)
             else:
-                logger.warning(f"Failed to get detailed info for episode: {episode_id}")
+                logger.warning(f"Failed to get detailed info for episode: {episode_name}")
         
         logger.info(f"Returning {len(matches)} detailed matches for search term: '{search_term}'")
         return matches
@@ -1087,7 +1101,7 @@ class TelemetryNeo4jClient:
         MATCH (c {{uuid: $content_uuid, group_id: '{self.CONTENT_GROUP_ID}'}})
         OPTIONAL MATCH (c)-[:HAS_METADATA]->(m)
         RETURN c.title as title, c.name as name, c.original_title as original_title,
-               m.episode_id as episode_id, m.telemetry_id as telemetry_id
+               m.episode_name as episode_name, m.telemetry_id as telemetry_id
         """
         params = {"content_uuid": content_uuid}
         
@@ -1101,9 +1115,9 @@ class TelemetryNeo4jClient:
         if result[0].get('telemetry_id'):
             return await self.get_episode_info(result[0]['telemetry_id'])
             
-        # Try episode_id next
-        if result[0].get('episode_id'):
-            return await self.get_episode_info(result[0]['episode_id'])
+        # Try episode_name next
+        if result[0].get('episode_name'):
+            return await self.get_episode_info(result[0]['episode_name'])
         
         # Fall back to title-based search
         for field in ['title', 'name', 'original_title']:
@@ -1163,7 +1177,7 @@ class TelemetryNeo4jClient:
         # Get all telemetry logs that match this content by name and timing
         telemetry_query = f"""
         MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
-        WHERE (l.original_name = $content_name OR l.episode_id = $content_name)
+        WHERE (l.original_name = $content_name OR l.episode_name = $content_name)
         AND l.status = 'completed'
         RETURN l, id(l) as telemetry_id_number
         """
@@ -1176,7 +1190,7 @@ class TelemetryNeo4jClient:
             fuzzy_query = f"""
             MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
             WHERE toLower(l.original_name) CONTAINS toLower($name_fragment) 
-            OR toLower(l.episode_id) CONTAINS toLower($name_fragment)
+            OR toLower(l.episode_name) CONTAINS toLower($name_fragment)
             RETURN l, id(l) as telemetry_id_number
             ORDER BY l.start_time DESC
             LIMIT 5
@@ -1214,7 +1228,7 @@ class TelemetryNeo4jClient:
             episode_info["match_confidence"] = "high" if telemetry_node.get('original_name') == content_name else "medium"
             
             # Get detailed processing information
-            detailed_info = await self.get_episode_info(telemetry_node.get('episode_id'))
+            detailed_info = await self.get_episode_info(telemetry_node.get('episode_name'))
             if detailed_info:
                 episode_info.update(detailed_info)
                 
@@ -1226,11 +1240,11 @@ class TelemetryNeo4jClient:
             "matches_found": len(matches)
         }
         
-    async def find_related_content(self, episode_id: str, content_group_id: str = None):
+    async def find_related_content(self, episode_name: str, content_group_id: str = None):
         """Find content nodes that were created from this telemetry episode.
         
         Args:
-            episode_id: ID of the telemetry episode
+            episode_name: ID of the telemetry episode
             content_group_id: Optional content group_id to search within. If not provided, 
                           will use the client_group_id from the telemetry record.
             
@@ -1239,12 +1253,12 @@ class TelemetryNeo4jClient:
         """
         # First get the telemetry log to get client_group_id
         query = f"""
-        MATCH (l:EpisodeProcessingLog {{episode_id: $episode_id, group_id: '{self.TELEMETRY_GROUP_ID}'}})  
+        MATCH (l:EpisodeProcessingLog {{episode_name: $episode_name, group_id: '{self.TELEMETRY_GROUP_ID}'}})  
         RETURN l.client_group_id as client_group_id, l.original_name as original_name, 
                l.status as status, l.start_time as start_time
         """
         
-        params = {"episode_id": episode_id}
+        params = {"episode_name": episode_name}
         result = await self.run_query(query, params)
         
         if not result or len(result) == 0:
@@ -1373,15 +1387,15 @@ class TelemetryNeo4jClient:
             search_term = title or name
             telemetry_query = f"""
             MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}})
-            WHERE l.original_name = $search_term OR l.episode_id = $search_term
-               OR l.original_name CONTAINS $search_term OR l.episode_id CONTAINS $search_term
-            RETURN l.episode_id as episode_id
+            WHERE l.original_name = $search_term OR l.episode_name = $search_term
+               OR l.original_name CONTAINS $search_term OR l.episode_name CONTAINS $search_term
+            RETURN l.episode_name as episode_name
             """
             
             telemetry_result = await self.run_query(telemetry_query, {"search_term": search_term})
-            if telemetry_result and len(telemetry_result) > 0 and telemetry_result[0].get('episode_id'):
+            if telemetry_result and len(telemetry_result) > 0 and telemetry_result[0].get('episode_name'):
                 logger.info(f"Found telemetry for content {content_uuid} by matching with {search_term}")
-                return await self.get_episode_info(telemetry_result[0]['episode_id'])
+                return await self.get_episode_info(telemetry_result[0]['episode_name'])
         
         # No matching telemetry found
         logger.info(f"No telemetry found for content UUID {content_uuid}")

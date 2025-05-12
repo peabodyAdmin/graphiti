@@ -340,20 +340,12 @@ class Graphiti:
             start = time()
             now = utc_now()
             
-            # Record start of processing with telemetry
-            if telemetry_client:
-                await telemetry_client.record_episode_start(
-                    episode_id=name,
-                    original_name=name,
-                    group_id=group_id
-                )
-
             validate_entity_types(entity_types)
 
             # Record previous episode retrieval step
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=name,
+                    episode_name=name,
                     step_name="retrieve_previous_episodes", 
                     status="started"
                 )
@@ -372,7 +364,7 @@ class Graphiti:
             # Record successful retrieval
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=name,
+                    episode_name=name,
                     step_name="retrieve_previous_episodes", 
                     status="success",
                     data={"episode_count": len(previous_episodes)}
@@ -396,7 +388,7 @@ class Graphiti:
             # Extract entities as nodes
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=name,
+                    episode_name=name,
                     step_name="node_extraction", 
                     status="started"
                 )
@@ -408,7 +400,7 @@ class Graphiti:
             # Record successful node extraction
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=name,
+                    episode_name=name,
                     step_name="node_extraction", 
                     status="success",
                     data={"extracted_node_count": len(extracted_nodes)}
@@ -417,7 +409,7 @@ class Graphiti:
             # Extract edges and resolve nodes
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=name,
+                    episode_name=name,
                     step_name="edge_extraction_node_resolution", 
                     status="started"
                 )
@@ -436,7 +428,7 @@ class Graphiti:
             # Record successful edge extraction and node resolution
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=name,
+                    episode_name=name,
                     step_name="edge_extraction_node_resolution", 
                     status="success",
                     data={"resolved_node_count": len(nodes), "extracted_edge_count": len(extracted_edges)}
@@ -446,7 +438,7 @@ class Graphiti:
 
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=name,
+                    episode_name=name,
                     step_name="edge_resolution_node_hydration", 
                     status="started"
                 )
@@ -464,7 +456,7 @@ class Graphiti:
             # Record successful edge resolution and node hydration
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=name,
+                    episode_name=name,
                     step_name="edge_resolution_node_hydration", 
                     status="success",
                     data={
@@ -485,7 +477,7 @@ class Graphiti:
 
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=name,
+                    episode_name=name,
                     step_name="database_update", 
                     status="started"
                 )
@@ -497,7 +489,7 @@ class Graphiti:
             # Record successful database update
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=name,
+                    episode_name=name,
                     step_name="database_update", 
                     status="success",
                     data={
@@ -523,7 +515,7 @@ class Graphiti:
             # Record episode completion
             if telemetry_client:
                 await telemetry_client.record_episode_completion(
-                    episode_id=name,
+                    episode_name=name,
                     status="completed"
                 )
 
@@ -534,19 +526,18 @@ class Graphiti:
             if telemetry_client:
                 import traceback
                 current_step = "unknown"  # We don't know exactly where it failed
-                for episode_data in bulk_episodes:
-                    await telemetry_client.record_error(
-                        episode_id=episode_data.name,
-                        step_name=current_step,
-                        error_type=type(e).__name__,
-                        error_message=str(e),
-                        stack_trace=traceback.format_exc()
-                    )
-                    # Mark episode as failed
-                    await telemetry_client.record_episode_completion(
-                        episode_id=episode_data.name,
-                        status="failed"
-                    )
+                await telemetry_client.record_error(
+                    episode_name=name,
+                    step_name=current_step,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    stack_trace=traceback.format_exc()
+                )
+                # Mark episode as failed
+                await telemetry_client.record_episode_completion(
+                    episode_name=name,
+                    status="failed"
+                )
             raise e
 
     #### WIP: USE AT YOUR OWN RISK ####
@@ -609,7 +600,7 @@ class Graphiti:
             if telemetry_client:
                 for episode in episodes:
                     await telemetry_client.record_processing_step(
-                        episode_id=episode.name,
+                        episode_name=episode.name,
                         step_name="episode_save", 
                         status="started"
                     )
@@ -619,7 +610,7 @@ class Graphiti:
             if telemetry_client:
                 for episode in episodes:
                     await telemetry_client.record_processing_step(
-                        episode_id=episode.name,
+                        episode_name=episode.name,
                         step_name="episode_save", 
                         status="success"
                     )
@@ -628,7 +619,7 @@ class Graphiti:
             if telemetry_client:
                 for episode in episodes:
                     await telemetry_client.record_processing_step(
-                        episode_id=episode.name,
+                        episode_name=episode.name,
                         step_name="retrieve_previous_episodes", 
                         status="started"
                     )
@@ -638,7 +629,7 @@ class Graphiti:
             if telemetry_client:
                 for episode in episodes:
                     await telemetry_client.record_processing_step(
-                        episode_id=episode.name,
+                        episode_name=episode.name,
                         step_name="retrieve_previous_episodes", 
                         status="success",
                         data={"episode_count": len(episode_pairs)}
@@ -648,7 +639,7 @@ class Graphiti:
             if telemetry_client:
                 for episode in episodes:
                     await telemetry_client.record_processing_step(
-                        episode_id=episode.name,
+                        episode_name=episode.name,
                         step_name="node_edge_extraction", 
                         status="started"
                     )
@@ -662,7 +653,7 @@ class Graphiti:
             if telemetry_client:
                 for episode in episodes:
                     await telemetry_client.record_processing_step(
-                        episode_id=episode.name,
+                        episode_name=episode.name,
                         step_name="node_edge_extraction", 
                         status="success",
                         data={
@@ -719,7 +710,7 @@ class Graphiti:
             if telemetry_client:
                 for episode in episodes:
                     await telemetry_client.record_episode_completion(
-                        episode_id=episode.name,
+                        episode_name=episode.name,
                         status="completed"
                     )
 
@@ -730,7 +721,7 @@ class Graphiti:
                 current_step = "unknown"  # We don't know exactly where it failed
                 for episode_data in bulk_episodes:
                     await telemetry_client.record_error(
-                        episode_id=episode_data.name,
+                        episode_name=episode_data.name,
                         step_name=current_step,
                         error_type=type(e).__name__,
                         error_message=str(e),
@@ -738,7 +729,7 @@ class Graphiti:
                     )
                     # Mark episode as failed
                     await telemetry_client.record_episode_completion(
-                        episode_id=episode_data.name,
+                        episode_name=episode_data.name,
                         status="failed"
                     )
             raise e

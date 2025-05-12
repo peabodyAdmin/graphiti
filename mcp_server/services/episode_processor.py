@@ -33,7 +33,7 @@ async def process_episode_queue(
     # Record start of processing
     if telemetry_client:
         await telemetry_client.record_episode_start(
-            episode_id=episode_data["name"],
+            episode_name=episode_data["name"],
             original_name=episode_data["name"],
             group_id=group_id
         )
@@ -46,7 +46,7 @@ async def process_episode_queue(
             # Record processing step start
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=episode_data["name"],
+                    episode_name=episode_data["name"],
                     step_name="ingestion", 
                     status="started"
                 )
@@ -78,12 +78,13 @@ async def process_episode_queue(
             # Record success
             if telemetry_client:
                 await telemetry_client.record_processing_step(
-                    episode_id=episode_data["name"],
+                    episode_name=episode_data["name"],
                     step_name="ingestion", 
                     status="success"
                 )
                 await telemetry_client.record_episode_completion(
-                    episode_id=episode_data["name"],
+                    episode_name=episode_data["name"],
+                    episodeElementId=episode_data.get("episodeElementId"),
                     status="completed"
                 )
             break
@@ -91,7 +92,7 @@ async def process_episode_queue(
             # Record transient error
             if telemetry_client:
                 await telemetry_client.record_error(
-                    episode_id=episode_data["name"],
+                    episode_name=episode_data["name"],
                     step_name="ingestion",
                     error_type=type(e).__name__,
                     error_message=str(e),
@@ -108,7 +109,7 @@ async def process_episode_queue(
                 logger.error(f"Failed to process episode after {max_retries} retries")
                 if telemetry_client:
                     await telemetry_client.record_episode_completion(
-                        episode_id=episode_data["name"],
+                        episode_name=episode_data["name"],
                         status="failed"
                     )
                 # Phase 3 will include proper storage of failed episodes
