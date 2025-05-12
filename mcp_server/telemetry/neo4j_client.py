@@ -4,8 +4,10 @@ Neo4j client for telemetry, bypassing Graphiti but using same connection details
 
 import json
 import logging
+import re
 import traceback
 from datetime import datetime
+import datetime as dt_module  # For timedelta
 from typing import Any, Dict, List, Optional
 
 from neo4j import AsyncGraphDatabase
@@ -20,17 +22,18 @@ class TelemetryNeo4jClient:
     TELEMETRY_GROUP_ID = 'graphiti_logs'
     CONTENT_GROUP_ID = 'graphiti'
     
-    def __init__(self, neo4j_uri: str, auth: Tuple[str, str], database: str = "neo4j", group_id: str = None):
+    def __init__(self, uri: str, user: str, password: str, database: str = "neo4j", group_id: str = None):
         """Initialize the Neo4j Client for telemetry
         
         Args:
-            neo4j_uri: URI for Neo4j server connection
-            auth: Tuple of (username, password) for authentication
+            uri: URI for Neo4j server connection
+            user: Username for authentication
+            password: Password for authentication
             database: Neo4j database name to use
             group_id: Group ID to use for telemetry nodes, or None to be group agnostic
         """
-        self.uri = neo4j_uri
-        self.auth = auth
+        self.uri = uri
+        self.auth = (user, password)  # Convert to tuple for Neo4j driver
         self.database = database
         self.driver = AsyncGraphDatabase.driver(self.uri, auth=self.auth)
         self.initialization_verified = False
@@ -39,7 +42,7 @@ class TelemetryNeo4jClient:
         # If None, the client will search across all groups
         self.group_id = group_id
         # Log connection details (without password)
-        logger.info(f"Initialized Neo4j telemetry client: URI={neo4j_uri}, Database={database}")
+        logger.info(f"Initialized Neo4j telemetry client: URI={uri}, Database={database}")
         
 
     
@@ -711,41 +714,79 @@ class TelemetryNeo4jClient:
             }
         return {}
     
-    async def get_episode_info(self, episode_id: str) -> Dict[str, Any]:
-        """
-        Get detailed information about a specific episode.
+    async def get_episode_info(self, episode_identifier: str) -> Dict[str, Any]:
+        """Get detailed information about an episode, including processing steps and errors.
         
         Args:
-            episode_id: ID of the episode to retrieve
+            episode_identifier: Either the episode_id property value OR a Neo4j internal ID 
+                              in the format "1105c001-9aca-44df-b787-08a8d10a5d70"
             
         Returns:
-            Dictionary with episode information and processing steps
+            Dictionary with episode information
         """
-        # Build flexible query with or without group_id filter
-        group_params, group_filter = self._get_group_filter(include_group_id=True)
+        # Ensure DB connectivity is verified
+        await self.ensure_verified()
         
-        # If group filter is set, include it in the query
-        filter_clause = f", {group_filter}" if group_filter else ""
+        # Determine if this is likely a Neo4j elementId (UUID format) or an episode_id property
+        is_neo4j_id = bool(re.match(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', episode_identifier))
         
-        query = f"""
-        MATCH (l:EpisodeProcessingLog {{episode_id: $episode_id{filter_clause}}})
-        OPTIONAL MATCH (l)-[:PROCESSED]->(s:ProcessingStep)
-        OPTIONAL MATCH (l)-[:TRACKED_BY]->(t:EpisodeTracking)
-        OPTIONAL MATCH (l)-[:HAS_TIMING]->(timing:EpisodeTiming)
-        RETURN l, collect(DISTINCT s) as steps, collect(DISTINCT t) as tracking, collect(DISTINCT timing) as timing_data
-        """
+        logger.info(f"Looking up episode with {'Neo4j ID' if is_neo4j_id else 'episode_id'}: {episode_identifier}")
         
-        # Merge the episode ID with any group params
-        params = {"episode_id": episode_id}
-        params.update(group_params)
+        # Construct the appropriate query based on identifier type
+        if is_neo4j_id:
+            # Handle Neo4j internal ID lookup - extract the UUID portion
+            uuid_parts = episode_identifier.split(':')
+            if len(uuid_parts) > 1:
+                # If format is like "4:1105c001-9aca-44df-b787-08a8d10a5d70:121", extract the UUID
+                uuid = uuid_parts[1]
+            else:
+                # If already just a UUID
+                uuid = episode_identifier
+                
+            query = f"""
+            MATCH (l) WHERE id(l) = $node_id AND l.group_id = '{self.TELEMETRY_GROUP_ID}'
+            RETURN l as episode
+            """
+            params = {"node_id": int(uuid_parts[2]) if len(uuid_parts) > 2 else None}  # Convert ID part to integer
+            
+            logger.info(f"Querying with Neo4j ID parameters: {params}")
+        else:
+            # Regular episode_id property lookup
+            query = f"""
+            MATCH (l:EpisodeProcessingLog {{episode_id: $episode_id, group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
+            RETURN l as episode
+            """
+            params = {"episode_id": episode_identifier}
         
         result = await self.run_query(query, params)
-        if not result or len(result) == 0:
-            return {}
-            
-        episode_data = dict(result[0]['l'])
-        steps_data = [dict(s) for s in result[0]['steps'] if s is not None]
         
+        # If the primary lookup failed, try alternative approaches
+        if not result or len(result) == 0:
+            logger.warning(f"Primary lookup failed for {episode_identifier}, trying alternatives")
+            
+            # Try a more generic lookup approach
+            fallback_query = f"""
+            MATCH (l) 
+            WHERE l.group_id = '{self.TELEMETRY_GROUP_ID}' AND
+                  (l.episode_id = $id OR 
+                   l.original_name = $id OR
+                   toString(id(l)) CONTAINS $id_fragment)
+            RETURN l as episode LIMIT 1
+            """
+            
+            # Extract a fragment to use for partial matching on Neo4j IDs
+            id_fragment = episode_identifier.split(':')[1] if ':' in episode_identifier else episode_identifier
+            id_fragment = id_fragment[:8]  # Use first portion for matching
+            
+            fallback_params = {"id": episode_identifier, "id_fragment": id_fragment}
+            result = await self.run_query(fallback_query, fallback_params)
+            
+            if not result or len(result) == 0:
+                logger.error(f"All lookup attempts failed for {episode_identifier}")
+                return {}
+        
+        episode_data = result[0].get('episode', {})
+        logger.info(f"Found episode: {episode_data}")
         # Process tracking data
         tracking_data = [dict(t) for t in result[0]['tracking'] if t is not None]
         
@@ -775,13 +816,68 @@ class TelemetryNeo4jClient:
                 if isinstance(timing[key], datetime):
                     timing[key] = timing[key].isoformat()
                 
-        # Return a complete telemetry picture
+        # Add processing timeline
+        timeline = []
+        for step in steps_data:
+            timeline.append({
+                "step_name": step.get("step_name", "Unknown step"),
+                "status": step.get("status", "unknown"),
+                "timestamp": step.get("start_time", ""),
+                "duration_ms": step.get("duration_ms", 0),
+                "message": self._get_step_message(step)
+            })
+            
+        # Sort timeline by timestamp
+        timeline.sort(key=lambda x: x["timestamp"])
+        
+        # Add processing outcome summary
+        success = episode_data.get("status") == "completed"
+        processing_time = episode_data.get("processing_time_ms", 0)
+        
+        outcome_summary = {
+            "success": success,
+            "processing_time_ms": processing_time,
+            "total_steps": len(steps_data),
+            "error_count": sum(1 for step in steps_data if step.get("status") == "error"),
+            "completion_time": episode_data.get("end_time", ""),
+            "attempt_count": episode_data.get("attempt_count", 1)
+        }
+        
+        # Return enhanced data
         return {
             "episode": episode_data,
             "steps": steps_data,
             "tracking": tracking_data,
-            "timing": timing_data
+            "timing": timing_data,
+            "timeline": timeline,
+            "outcome_summary": outcome_summary
         }
+        
+    def _get_step_message(self, step) -> str:
+        """Generate a human-readable message about a processing step.
+        
+        Args:
+            step: Dictionary containing step data
+            
+        Returns:
+            A string message describing the step
+        """
+        status = step.get("status", "unknown")
+        step_name = step.get("step_name", "Unknown step")
+        
+        if status == "success":
+            return f"Successfully completed {step_name}"
+        elif status == "error":
+            error_type = step.get("data", {}).get("error_type", "Unknown error")
+            error_message = step.get("data", {}).get("error_message", "No details available")
+            return f"Error in {step_name}: {error_type} - {error_message}"
+        elif status == "started":
+            return f"Started {step_name}"
+        elif status == "warning":
+            message = step.get("data", {}).get("message", "No details available")
+            return f"Warning in {step_name}: {message}"
+        else:
+            return f"{step_name} status: {status}"
         
     async def find_failed_episodes(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Find episodes that failed processing.
@@ -809,45 +905,170 @@ class TelemetryNeo4jClient:
             
         return [dict(r) for r in result]
     
-    async def find_episode_by_name_or_id(self, search_term: str) -> Dict[str, Any]:
-        """Find telemetry for an episode using a name, title, or ID string.
+    async def find_episode_by_name_or_id(self, search_term: str, limit: int = 5, client_group_id: str = None):
+        """Find telemetry for episodes using a name, title, or ID string.
         
-        This method is especially useful for finding failed episodes that don't have
-        corresponding content nodes.
+        This method supports partial matching and returns multiple results when appropriate.
         
         Args:
             search_term: Any identifier string - could be an episode name, title, or UUID
+            limit: Maximum number of matching episodes to return
+            client_group_id: Optional client group_id to filter telemetry records
             
         Returns:
-            Dictionary with telemetry information or empty dict if not found
+            List of dictionaries with telemetry information 
         """
-        # First try exact match on episode_id or original_name
-        query = f"""
+        logger.info(f"Searching for telemetry with term: '{search_term}', client_group_id: {client_group_id}")
+        
+        # More comprehensive diagnostic query to check exactly what's in the database
+        diagnostic_query = f"""
         MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
-        WHERE l.episode_id = $search_term OR l.original_name = $search_term
-        RETURN l.episode_id as episode_id LIMIT 1
+        RETURN l as full_node, l.episode_id as episode_id, l.original_name as original_name, 
+               l.status as status, l.client_group_id as client_group_id,
+               l.start_time as start_time, l.end_time as end_time,
+               labels(l) as labels
+        LIMIT 10
         """
         
-        params = {"search_term": search_term}
+        # Run diagnostic query to see what's in the database
+        diagnostic_result = await self.run_query(diagnostic_query)
+        if diagnostic_result:
+            logger.info(f"Sample telemetry records found in database: {diagnostic_result}")
+            # Explicitly log the properties of each node for easier debugging
+            for i, record in enumerate(diagnostic_result):
+                if 'full_node' in record:
+                    node_props = record['full_node']
+                    logger.info(f"Record {i+1} properties: {node_props}")
+        else:
+            logger.warning("No telemetry records found in database during diagnostic check")
+            
+        # Also try a simpler query to check if node structure might be different
+        simple_check = f"""
+        MATCH (l) WHERE l.group_id = '{self.TELEMETRY_GROUP_ID}'
+        RETURN count(l) as count, collect(distinct labels(l)) as node_types
+        """
+        simple_result = await self.run_query(simple_check)
+        if simple_result:
+            logger.info(f"Database overview: {simple_result}")
+        
+        # Build filter clause based on client_group_id
+        client_filter = ""
+        if client_group_id:
+            client_filter = " AND l.client_group_id = $client_group_id"
+        
+        # Enhanced query with more flexible matching
+        query = f"""
+        // Exact match (highest priority)
+        MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
+        WHERE (l.episode_id = $search_term OR l.original_name = $search_term){client_filter}
+        RETURN l as log, 3 as score
+        
+        UNION
+        
+        // String contains match (medium priority)
+        MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}})  
+        WHERE (l.episode_id CONTAINS $search_term OR l.original_name CONTAINS $search_term)
+        AND NOT (l.episode_id = $search_term OR l.original_name = $search_term){client_filter}
+        RETURN l as log, 2 as score
+        
+        UNION
+        
+        // Case-insensitive match (lower priority)
+        MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}})  
+        WHERE (toLower(l.episode_id) CONTAINS toLower($search_term) OR toLower(l.original_name) CONTAINS toLower($search_term))
+        AND NOT (l.episode_id CONTAINS $search_term OR l.original_name CONTAINS $search_term){client_filter}
+        RETURN l as log, 1 as score
+        
+        UNION
+        
+        // Word boundary match for multi-word titles
+        MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}})  
+        WHERE ANY(word IN split(l.episode_id, ' ') WHERE word = $search_term)
+        OR ANY(word IN split(l.original_name, ' ') WHERE word = $search_term){client_filter}
+        AND NOT (toLower(l.episode_id) CONTAINS toLower($search_term) OR toLower(l.original_name) CONTAINS toLower($search_term))
+        RETURN l as log, 0.5 as score
+        
+        ORDER BY score DESC, l.start_time DESC
+        LIMIT $limit
+        """
+        
+        params = {"search_term": search_term, "limit": limit}
+        if client_group_id:
+            params["client_group_id"] = client_group_id
+        
+        logger.info(f"Executing telemetry search with query params: {params}")
         result = await self.run_query(query, params)
         
-        if result and len(result) > 0 and result[0].get('episode_id'):
-            return await self.get_episode_info(result[0]['episode_id'])
+        if not result:
+            logger.warning(f"No results found for search term: '{search_term}'")
+            # Try direct queries with different approaches for diagnosis
+            direct_queries = [
+                # Case-insensitive search with CONTAINS
+                f"""MATCH (l) WHERE l.group_id = '{self.TELEMETRY_GROUP_ID}' 
+                    AND (toLower(toString(l.episode_id)) CONTAINS toLower('forgotten') 
+                    OR toLower(toString(l.original_name)) CONTAINS toLower('forgotten'))
+                RETURN l""",
+                # Look for exact matches of the example we know exists
+                """MATCH (l) WHERE l.episode_id = 'Novel Story: The Forgotten Atlas' 
+                   RETURN l""",
+                # Try matching any node with properties that might contain our search term
+                """MATCH (l) 
+                   WHERE ANY(prop IN keys(l) WHERE toLower(toString(l[prop])) CONTAINS toLower('forgotten'))
+                   RETURN l LIMIT 5"""
+            ]
             
-        # If exact match fails, try contains
-        fuzzy_query = f"""
-        MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
-        WHERE l.episode_id CONTAINS $search_term OR l.original_name CONTAINS $search_term
-        RETURN l.episode_id as episode_id, l.original_name as name
-        ORDER BY size(l.episode_id) ASC
-        LIMIT 1
-        """
+            # Try each query to see if any find the record
+            for i, query in enumerate(direct_queries):
+                logger.info(f"Trying diagnostic query approach {i+1}")
+                direct_result = await self.run_query(query)
+                if direct_result:
+                    logger.info(f"Diagnostic query {i+1} found records: {direct_result}")
+                    # If we found something, use this approach to actually find the user's record
+                    if i == 0:
+                        # Case-insensitive CONTAINS was successful
+                        recovery_query = f"""MATCH (l) WHERE l.group_id = '{self.TELEMETRY_GROUP_ID}' 
+                            AND (toLower(toString(l.episode_id)) CONTAINS toLower($search_term) 
+                            OR toLower(toString(l.original_name)) CONTAINS toLower($search_term))
+                        RETURN l as log, 2 as score"""
+                        recovery_result = await self.run_query(recovery_query, {"search_term": search_term})
+                        if recovery_result:
+                            logger.info(f"Recovery search succeeded! Found {len(recovery_result)} results")
+                            result = recovery_result
+                    break
+            return []
         
-        fuzzy_result = await self.run_query(fuzzy_query, params)
-        if fuzzy_result and len(fuzzy_result) > 0 and fuzzy_result[0].get('episode_id'):
-            return await self.get_episode_info(fuzzy_result[0]['episode_id'])
+        logger.info(f"Found {len(result)} telemetry matches for '{search_term}'")
+        
+        # Get detailed info for each match
+        matches = []
+        for match in result:
+            if not match.get('log') or not match['log'].get('episode_id'):
+                logger.warning(f"Invalid match result missing log or episode_id: {match}")
+                continue
             
-        return {}
+            episode_id = match['log']['episode_id']
+            logger.info(f"Getting detailed info for episode: {episode_id}")
+            detailed_info = await self.get_episode_info(episode_id)
+            
+            if detailed_info:
+                # Add score and relevance info
+                if 'episode' in detailed_info:
+                    detailed_info['episode']['match_score'] = match['score']
+                    if match['score'] == 3:
+                        relevance = 'Exact match'
+                    elif match['score'] == 2:
+                        relevance = 'Partial match'
+                    elif match['score'] == 1:
+                        relevance = 'Case-insensitive match'
+                    else:
+                        relevance = 'Word match'
+                    detailed_info['episode']['match_relevance'] = relevance
+                matches.append(detailed_info)
+            else:
+                logger.warning(f"Failed to get detailed info for episode: {episode_id}")
+        
+        logger.info(f"Returning {len(matches)} detailed matches for search term: '{search_term}'")
+        return matches
     
     async def find_telemetry_for_content_uuid(self, content_uuid: str) -> Dict[str, Any]:
         """Find telemetry information for a content UUID from the graphiti database.
@@ -893,6 +1114,234 @@ class TelemetryNeo4jClient:
                     
         # If all else fails, try a fuzzy match
         return await self._find_telemetry_by_content_attributes(content_uuid)
+        
+    async def lookup_telemetry_for_content_uuid(self, content_uuid: str) -> Dict[str, Any]:
+        """Find telemetry information for a content node by its UUID.
+        
+        This is a better bridge between the content system and telemetry system than the existing functions.
+        It first looks at the content node's creation time and name, then finds matching telemetry records.
+        
+        Args:
+            content_uuid: UUID of a content node (e.g., "5ae89d70-6fe4-4140-8fc0-c52ff8dafb8c")
+            
+        Returns:
+            Dictionary with telemetry information or empty dict if not found
+        """
+        logger.info(f"Looking up telemetry for content UUID: {content_uuid}")
+        
+        # First get basic info about the content node
+        content_query = f"""
+        MATCH (c)
+        WHERE c.uuid = $content_uuid 
+        RETURN c.name as name, c.created_at as created_at, labels(c) as labels,
+               c.source as source, c.group_id as group_id
+        """
+        
+        content_result = await self.run_query(content_query, {"content_uuid": content_uuid})
+        
+        if not content_result or len(content_result) == 0:
+            logger.warning(f"No content found with UUID: {content_uuid}")
+            return {"error": f"No content found with UUID: {content_uuid}"}
+        
+        content_info = content_result[0]
+        logger.info(f"Found content: {content_info}")
+        
+        # Use the content creation time to find matching telemetry records
+        # (telemetry records should exist before the content was created)
+        created_at = content_info.get('created_at')
+        content_name = content_info.get('name')
+        
+        # Format timestamps appropriately
+        if isinstance(created_at, datetime):
+            created_at_str = created_at.isoformat()
+            created_before_str = (created_at - dt_module.timedelta(minutes=10)).isoformat()
+        else:
+            # If it's already a string
+            created_at_str = created_at
+            created_before_str = None
+        
+        # Get all telemetry logs that match this content by name and timing
+        telemetry_query = f"""
+        MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
+        WHERE (l.original_name = $content_name OR l.episode_id = $content_name)
+        AND l.status = 'completed'
+        RETURN l, id(l) as telemetry_id_number
+        """
+        
+        telemetry_result = await self.run_query(telemetry_query, {"content_name": content_name})
+        
+        if not telemetry_result or len(telemetry_result) == 0:
+            logger.warning(f"No telemetry records found for content name: {content_name}")
+            # Try a more flexible approach
+            fuzzy_query = f"""
+            MATCH (l:EpisodeProcessingLog {{group_id: '{self.TELEMETRY_GROUP_ID}'}}) 
+            WHERE toLower(l.original_name) CONTAINS toLower($name_fragment) 
+            OR toLower(l.episode_id) CONTAINS toLower($name_fragment)
+            RETURN l, id(l) as telemetry_id_number
+            ORDER BY l.start_time DESC
+            LIMIT 5
+            """
+            
+            # Get meaningful fragments from the name
+            name_words = content_name.split()
+            name_fragment = name_words[0] if len(name_words) > 0 else content_name
+            if len(name_words) > 1:
+                name_fragment += " " + name_words[1]
+                
+            fuzzy_result = await self.run_query(fuzzy_query, {"name_fragment": name_fragment})
+            if not fuzzy_result or len(fuzzy_result) == 0:
+                return {"error": f"No telemetry found for content: {content_name}"}
+                
+            telemetry_result = fuzzy_result
+            logger.info(f"Found {len(telemetry_result)} potential telemetry records using fuzzy matching")
+        
+        # Format the results
+        matches = []
+        for record in telemetry_result:
+            telemetry_node = record.get('l', {})
+            telemetry_id = record.get('telemetry_id_number')
+            
+            episode_info = {"episode": {}}
+            # Convert node to dict and handle datetime objects
+            for key, value in telemetry_node.items():
+                if isinstance(value, datetime):
+                    episode_info["episode"][key] = value.isoformat()
+                else:
+                    episode_info["episode"][key] = value
+            
+            # Add the Neo4j ID for reference
+            episode_info["episode"]["telemetry_node_id"] = telemetry_id
+            episode_info["match_confidence"] = "high" if telemetry_node.get('original_name') == content_name else "medium"
+            
+            # Get detailed processing information
+            detailed_info = await self.get_episode_info(telemetry_node.get('episode_id'))
+            if detailed_info:
+                episode_info.update(detailed_info)
+                
+            matches.append(episode_info)
+        
+        return {
+            "content_info": content_info,
+            "telemetry_matches": matches,
+            "matches_found": len(matches)
+        }
+        
+    async def find_related_content(self, episode_id: str, content_group_id: str = None):
+        """Find content nodes that were created from this telemetry episode.
+        
+        Args:
+            episode_id: ID of the telemetry episode
+            content_group_id: Optional content group_id to search within. If not provided, 
+                          will use the client_group_id from the telemetry record.
+            
+        Returns:
+            Dictionary with content information or empty dict if not found
+        """
+        # First get the telemetry log to get client_group_id
+        query = f"""
+        MATCH (l:EpisodeProcessingLog {{episode_id: $episode_id, group_id: '{self.TELEMETRY_GROUP_ID}'}})  
+        RETURN l.client_group_id as client_group_id, l.original_name as original_name, 
+               l.status as status, l.start_time as start_time
+        """
+        
+        params = {"episode_id": episode_id}
+        result = await self.run_query(query, params)
+        
+        if not result or len(result) == 0:
+            return {}
+            
+        # If episode failed, no content would be created
+        if result[0]['status'] == 'failed':
+            return {
+                "content_found": False,
+                "reason": "Episode processing failed, no content created",
+                "telemetry_status": result[0]['status']
+            }
+            
+        # Use provided content_group_id or fall back to client_group_id from telemetry
+        target_group_id = content_group_id or result[0]['client_group_id']
+        original_name = result[0]['original_name']
+        start_time = result[0]['start_time']
+        
+        # Format start_time to ISO format if it's a datetime
+        if isinstance(start_time, datetime):
+            start_time_str = start_time.isoformat()
+        else:
+            start_time_str = start_time
+        
+        # Build group filter based on content_group_id
+        group_filter = ""
+        if target_group_id:
+            group_filter = "group_id: $target_group_id"
+        
+        content_query = f"""
+        MATCH (c {{{group_filter}}})
+        WHERE c.name = $original_name AND c.created_at >= $start_time
+        RETURN c.uuid as uuid, c.name as name, c.group_id as group_id, labels(c) as labels,
+               c.created_at as created_at, c.valid_at as valid_at
+        """
+        
+        content_params = {
+            "original_name": original_name,
+            "start_time": start_time_str
+        }
+        if target_group_id:
+            content_params["target_group_id"] = target_group_id
+        
+        content_result = await self.run_query(content_query, content_params)
+        
+        if not content_result or len(content_result) == 0:
+            # Try a more flexible search if exact match fails
+            fuzzy_content_query = f"""
+            MATCH (c {{{group_filter}}})
+            WHERE (c.name CONTAINS $name_fragment OR c.title CONTAINS $name_fragment)
+            AND c.created_at >= $start_time
+            RETURN c.uuid as uuid, c.name as name, c.group_id as group_id, labels(c) as labels,
+                   c.created_at as created_at, c.valid_at as valid_at
+            """
+            
+            # Extract a meaningful fragment from the original name
+            name_words = original_name.split()
+            name_fragment = name_words[0] if len(name_words) > 0 else original_name
+            if len(name_words) > 1:
+                name_fragment += " " + name_words[1]
+                
+            fuzzy_params = {
+                "name_fragment": name_fragment,
+                "start_time": start_time_str
+            }
+            if target_group_id:
+                fuzzy_params["target_group_id"] = target_group_id
+            
+            content_result = await self.run_query(fuzzy_content_query, fuzzy_params)
+        
+        if not content_result or len(content_result) == 0:
+            return {
+                "content_found": False,
+                "reason": "No matching content found despite successful processing",
+                "telemetry_status": result[0]['status'],
+                "search_parameters": {
+                    "group_id": target_group_id,
+                    "original_name": original_name,
+                    "start_time": start_time_str
+                }
+            }
+            
+        # Format the results
+        content_nodes = []
+        for node in content_result:
+            formatted_node = dict(node)
+            # Convert datetime objects to strings
+            for key in formatted_node:
+                if isinstance(formatted_node[key], datetime):
+                    formatted_node[key] = formatted_node[key].isoformat()
+            content_nodes.append(formatted_node)
+            
+        return {
+            "content_found": True,
+            "content_nodes": content_nodes,
+            "telemetry_status": result[0]['status']
+        }
         
     async def _find_telemetry_by_content_attributes(self, content_uuid: str) -> Dict[str, Any]:
         """Find telemetry by looking at content attributes and matching against telemetry records.

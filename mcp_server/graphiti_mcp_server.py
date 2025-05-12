@@ -1289,62 +1289,87 @@ async def run_mcp_server():
 
 
 @mcp.tool()
-async def telemetry_episode_trace(episode_id: str) -> TelemetryResponse | ErrorResponse:
+async def telemetry_episode_trace(episode_id: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
     """Get the full processing trace for an episode.
     
     This tool provides detailed information about all processing steps and errors that occurred
     during the processing of a specific episode.
     
     Args:
-        episode_id: The unique ID of the episode to get trace information for
+        episode_id: The unique ID of the episode to get trace information for. This can be:
+                    - A Neo4j node ID (UUID format like '1105c001-9aca-44df-b787-08a8d10a5d70')
+                    - An episode title or name stored in the episode_id property
+                    - An element ID in format '4:1105c001-9aca-44df-b787-08a8d10a5d70:121'
+        content_group_id: Optional content group_id to search for related content. 
+                          If not provided, will use the client_group_id from telemetry.
     """
     if not telemetry_client:
         return {"error": "Telemetry system is not enabled"}
         
     try:
-        # Direct query instead of importing format_episode_trace which depends on fastapi
-        episode_history_query = """
-        MATCH (log:EpisodeProcessingLog {episode_id: $episode_id})
-        OPTIONAL MATCH (log)-[:PROCESSED]->(step:ProcessingStep)
-        OPTIONAL MATCH (step)-[:GENERATED_ERROR]->(error:ProcessingError)
-        RETURN log, step, error
-        ORDER BY step.start_time ASC
-        """
+        logger.info(f"Looking up telemetry for episode identifier: {episode_id}")
         
-        result = await telemetry_client.run_query(episode_history_query, {"episode_id": episode_id})
+        # Determine if this is a Neo4j internal ID and handle appropriately
+        is_uuid_format = bool(re.match(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', episode_id))
         
-        if not result:
-            return {"error": f"No telemetry data found for episode {episode_id}"}
+        if is_uuid_format or ':' in episode_id:
+            # Direct Neo4j ID lookup using the graph database ID
+            logger.info(f"Attempting Neo4j direct ID lookup for: {episode_id}")
+            query = """
+            MATCH (l) WHERE l.group_id = 'graphiti_logs'
+            RETURN l as episode, id(l) as node_id
+            """
             
-        # Manual formatting of the result
-        trace_data = {
-            "episode_id": episode_id,
-            "steps": []
-        }
+            # Execute query directly since we need all nodes to filter manually
+            all_nodes = await telemetry_client.run_query(query)
+            
+            # Find matching node by ID
+            matched_node = None
+            uuid_part = episode_id.split(':')[1] if ':' in episode_id else episode_id
+            
+            if all_nodes:
+                logger.info(f"Found {len(all_nodes)} telemetry records, searching for UUID part: {uuid_part}")
+                for node in all_nodes:
+                    node_id_str = str(node.get('node_id', ''))
+                    if node_id_str == uuid_part or uuid_part in node_id_str:
+                        matched_node = node.get('episode')
+                        logger.info(f"Found matching node by ID: {matched_node}")
+                        break
+            
+            if matched_node:
+                # Format the episode data
+                episode_info = {'episode': {}}
+                # Convert node to dict and handle datetime objects
+                for key, value in matched_node.items():
+                    if isinstance(value, datetime):
+                        episode_info['episode'][key] = value.isoformat()
+                    else:
+                        episode_info['episode'][key] = value
+                        
+                # Get the actual episode_id for related content
+                actual_episode_id = matched_node.get('episode_id', episode_id)
+            else:
+                return {"error": f"No telemetry data found matching ID {episode_id}"}
+        else:
+            # Standard lookup by episode_id property
+            episode_info = await telemetry_client.get_episode_info(episode_id)
+            actual_episode_id = episode_id
         
-        # Process the results
-        for record in result:
-            if 'step' in record and record['step']:
-                step_data = {
-                    "step_name": record['step'].get('step_name', 'unknown'),
-                    "status": record['step'].get('status', 'unknown'),
-                    "start_time": record['step'].get('start_time', None),
-                    "end_time": record['step'].get('end_time', None),
-                    "data": record['step'].get('data', '{}'),
-                    "errors": []
-                }
-                
-                if 'error' in record and record['error']:
-                    error_data = {
-                        "error_type": record['error'].get('error_type', 'unknown'),
-                        "error_message": record['error'].get('error_message', ''),
-                        "created_at": record['error'].get('created_at', None)
-                    }
-                    step_data["errors"].append(error_data)
-                    
-                trace_data["steps"].append(step_data)
-                
-        return {"data": trace_data, "message": f"Successfully retrieved trace for episode {episode_id}"}
+        if not episode_info or not episode_info.get('episode'):
+            return {"error": f"No telemetry data found for episode {episode_id}"}
+        
+        # Find related content if processing was successful
+        if episode_info.get("episode", {}).get("status") == "completed":
+            related_content = await telemetry_client.find_related_content(
+                actual_episode_id, 
+                content_group_id=content_group_id
+            )
+            episode_info["related_content"] = related_content
+        
+        return {
+            "data": episode_info, 
+            "message": f"Retrieved telemetry trace for episode: {episode_id}"
+        }
     except Exception as e:
         logger.error(f"Error retrieving episode trace: {e}")
         logger.error(traceback.format_exc())
@@ -1440,6 +1465,132 @@ async def telemetry_recent_errors() -> TelemetryResponse | ErrorResponse:
         return {"data": result, "message": "Successfully retrieved recent errors"}
     except Exception as e:
         return {"error": f"Failed to retrieve recent errors: {str(e)}"}
+
+
+@mcp.tool()
+async def telemetry_lookup_by_content_uuid(content_uuid: str) -> TelemetryResponse | ErrorResponse:
+    """Find telemetry records related to a specific content node by its UUID.
+    
+    This tool provides a direct bridge between content in the knowledge graph and
+    the telemetry system that tracks how that content was processed. It's especially
+    useful for finding the processing history of specific content items.
+    
+    Args:
+        content_uuid: The UUID of the content node to find telemetry for
+    """
+    if not telemetry_client:
+        return {"error": "Telemetry system is not enabled"}
+    
+    try:
+        logger.info(f"Looking up telemetry for content UUID: {content_uuid}")
+        # Use the enhanced lookup method to find telemetry records
+        results = await telemetry_client.lookup_telemetry_for_content_uuid(content_uuid)
+        
+        if "error" in results:
+            return {"error": results["error"]}
+            
+        return {
+            "data": results, 
+            "message": f"Found {results.get('matches_found', 0)} telemetry records for content {results.get('content_info', {}).get('name')}"
+        }
+    except Exception as e:
+        logger.error(f"Error looking up telemetry for content UUID: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {"error": f"Failed to lookup telemetry: {str(e)}"}
+
+
+@mcp.tool()
+async def telemetry_search(search_term: str, limit: int = 5, client_group_id: str = None) -> TelemetryResponse | ErrorResponse:
+    """Search for telemetry records by name or ID fragments.
+    
+    This tool allows finding telemetry records using partial names, IDs, or fuzzy matches,
+    making it easier to locate processing information for specific episodes.
+    
+    Args:
+        search_term: Text to search for - can be a partial name, ID, or fragment
+        limit: Maximum number of results to return (default: 5)
+        client_group_id: Optional client group_id to filter results to a specific content group
+    """
+    if not telemetry_client:
+        return {"error": "Telemetry system is not enabled"}
+    
+    try:
+        # Search for matching telemetry records
+        matches = await telemetry_client.find_episode_by_name_or_id(
+            search_term, 
+            limit=limit,
+            client_group_id=client_group_id
+        )
+        
+        if not matches:
+            return {
+                "data": [],
+                "message": f"No telemetry records found matching '{search_term}'"
+            }
+            
+        # Create a summary of each match for easier browsing
+        match_summaries = []
+        for match in matches:
+            episode = match.get("episode", {})
+            summary = {
+                "episode_id": episode.get("episode_id", "Unknown"),
+                "original_name": episode.get("original_name", "Unknown"),
+                "status": episode.get("status", "Unknown"),
+                "start_time": episode.get("start_time", ""),
+                "processing_time_ms": episode.get("processing_time_ms", 0),
+                "match_relevance": episode.get("match_relevance", "Unknown"),
+                "client_group_id": episode.get("client_group_id", "Unknown"),
+                "attempt_count": episode.get("attempt_count", 1),
+                "error_count": match.get("outcome_summary", {}).get("error_count", 0)
+            }
+            match_summaries.append(summary)
+        
+        return {
+            "data": match_summaries,
+            "message": f"Found {len(matches)} telemetry records matching '{search_term}'"
+        }
+    except Exception as e:
+        logger.error(f"Error searching telemetry records: {e}")
+        logger.error(traceback.format_exc())
+        return {"error": f"Failed to search telemetry records: {str(e)}"}
+
+
+@mcp.tool()
+async def telemetry_find_content(episode_id: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
+    """Find content created from a telemetry episode.
+    
+    This tool helps bridge the gap between telemetry records and the actual content
+    that was created as a result of successful processing.
+    
+    Args:
+        episode_id: The ID of the telemetry episode to find content for
+        content_group_id: Optional content group_id to search within. If not provided, 
+                         will use the client_group_id from the telemetry record.
+    """
+    if not telemetry_client:
+        return {"error": "Telemetry system is not enabled"}
+    
+    try:
+        # Find related content
+        related_content = await telemetry_client.find_related_content(
+            episode_id,
+            content_group_id=content_group_id
+        )
+        
+        if not related_content.get("content_found", False):
+            return {
+                "data": related_content,
+                "message": f"No content found for telemetry episode: {episode_id}. Reason: {related_content.get('reason', 'Unknown')}"
+            }
+            
+        return {
+            "data": related_content,
+            "message": f"Found related content for telemetry episode: {episode_id}"
+        }
+    except Exception as e:
+        logger.error(f"Error finding content for telemetry episode: {e}")
+        logger.error(traceback.format_exc())
+        return {"error": f"Failed to find content for telemetry episode: {str(e)}"}
 
 
 def main():
