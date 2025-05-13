@@ -550,16 +550,18 @@ You are the **Graphiti Ingestion Assistant**.
 You will:
 
 1. Accept one Markdown file (no front matter).
-2. Analyze the content and search for similar prior episodes in `group_id: aeon_inception`.
-3. Generate valid metadata (`tags`, `labels`, etc.) based on those examples.
-4. Prepare the episode for ingestion with properties directly.
-5. Ingest the document into graphiti knowledgebase under the group_id: aeon_inception.
+2. Analyze the content using the client-specified group_id.
+3. Search for similar prior episodes in the client-specified group_id.
+4. Generate valid metadata (`tags`, `labels`, etc.) based on those examples.
+5. Prepare the episode for ingestion with properties directly.
+6. Ingest the document into the Graphiti knowledge graph under the client-specified group_id.
 
 ---
 
 You will not:
-1. Create any episodes, nodes or edges outside of group_id: aeon_inception.
-2. Perform unnecessary verification steps.
+1. Create any episodes, nodes or edges outside of the client-specified group_id.
+2. Hard-code any default group_id values.
+3. Perform unnecessary verification steps.
 
 ## 🛠 Required Properties Format
 
@@ -569,7 +571,7 @@ The episode will be ingested with the following properties:
 {
     "name": str,  # The episode name
     "content": str,  # The original markdown content
-    "group_id": "aeon_inception",
+    "group_id": str,  # MUST use the client-specified group_id
     "tags": list[str],  # Array of lowercase, hyphenated tags
     "labels": list[str],  # Array of descriptive labels
     "source_description": str,  # Description of the content source
@@ -583,7 +585,7 @@ The episode will be ingested with the following properties:
 ## 🔍 Metadata Inference Process
 
 1. **Embed the document or summarize key content.**
-2. **Search for similar episodes** within the `aeon_inception` group.
+2. **Search for similar episodes** within the client-specified group_id.
 3. Extract the most common:
    - `tags` (lowercase, short, hyphenated),
    - `labels` (status, role, type indicators).
@@ -592,15 +594,17 @@ The episode will be ingested with the following properties:
 
 ## ✅ Ingestion Requirements
 
-- The episode must:
+- The episode MUST:
   - Have valid properties matching Graphiti's episode model
   - Use English terminology and formatting
-  - Be ingested under group_id: aeon_inception
+  - Be ingested under the client-specified group_id
+  - NEVER default to any hard-coded group_id
 
 ---
 
 ## ⚠️ Error Handling
 
+- If no group_id is specified by the client, respond with an error requesting this parameter.
 - If ingestion fails, log the error and stop processing.
 - If metadata fields are missing or uncertain:
   - Use default values
@@ -612,8 +616,7 @@ The episode will be ingested with the following properties:
 
 - [ ] Properties are valid and well-formed
 - [ ] `tags` and `labels` are populated based on similar episodes
-- [ ] `group_id` is set to `aeon_inception`
-- [ ] Episode is ingested by Graphiti
+- [ ] Episode is ingested using the client-specified group_id
 
 ## 📊 Telemetry Query Best Practices
 
@@ -794,7 +797,7 @@ async def process_episode_queue(group_id: str):
 async def add_episode(
     name: str,
     episode_body: str,
-    group_id: str | None = None,
+    group_id: str,  # Changed from str | None = None to make it required
     source: str = 'text',
     source_description: str = '',
     uuid: str | None = None,
@@ -811,8 +814,7 @@ async def add_episode(
         episode_body (str): The content of the episode. When source='json', this must be a properly escaped JSON string,
                            not a raw Python dictionary. The JSON data will be automatically processed
                            to extract entities and relationships.
-        group_id (str, optional): A unique ID for this graph. If not provided, uses the default group_id from CLI
-                                 or a generated one.
+        group_id (str): A unique ID for this graph. This MUST be specified to determine the namespace for the content.
         source (str, optional): Source type, must be one of:
                                - 'text': For plain text content (default)
                                - 'json': For structured data
@@ -829,7 +831,7 @@ async def add_episode(
             episode_body="Acme Corp announced a new product line today.",
             source="text",
             source_description="news article",
-            group_id="some_arbitrary_string"
+            group_id="my_company_news"  # Namespace for this content
         )
 
         # Adding structured JSON data
@@ -838,7 +840,8 @@ async def add_episode(
             name="Customer Profile",
             episode_body="{\\\"company\\\": {\\\"name\\\": \\\"Acme Technologies\\\"}, \\\"products\\\": [{\\\"id\\\": \\\"P001\\\", \\\"name\\\": \\\"CloudSync\\\"}, {\\\"id\\\": \\\"P002\\\", \\\"name\\\": \\\"DataMiner\\\"}]}",
             source="json",
-            source_description="CRM data"
+            source_description="CRM data",
+            group_id="customer_profiles"  # Namespace for this content
         )
 
         # Adding message-style content
@@ -847,7 +850,7 @@ async def add_episode(
             episode_body="user: What's your return policy?\nassistant: You can return items within 30 days.",
             source="message",
             source_description="chat transcript",
-            group_id="some_arbitrary_string"
+            group_id="customer_support"  # Namespace for this content
         )
 
     Notes:
@@ -863,6 +866,10 @@ async def add_episode(
     if graphiti_client is None:
         return {'error': 'Graphiti client not initialized'}
 
+    # Enforce group_id requirement
+    if not group_id:
+        return {'error': 'group_id must be specified to determine the namespace for this content'}
+
     try:
         # Map string source to EpisodeType enum
         source_type = EpisodeType.text
@@ -871,12 +878,8 @@ async def add_episode(
         elif source.lower() == 'json':
             source_type = EpisodeType.json
 
-        # Use the provided group_id or fall back to the default from config
-        effective_group_id = group_id if group_id is not None else config.group_id
-
-        # Cast group_id to str to satisfy type checker
-        # The Graphiti client expects a str for group_id, not Optional[str]
-        group_id_str = str(effective_group_id) if effective_group_id is not None else ''
+        # Use the provided group_id directly, without falling back to a default
+        group_id_str = str(group_id)
 
         # We've already checked that graphiti_client is not None above
         # This assert statement helps type checkers understand that graphiti_client is defined
@@ -912,7 +915,7 @@ async def add_episode(
 
         # Return immediately with a success message
         return {
-            'message': f"Episode '{name}' queued for processing (position: {episode_queues[group_id_str].qsize()})"
+            'message': f"Episode '{name}' queued for processing in group '{group_id_str}' (position: {episode_queues[group_id_str].qsize()})"
         }
     except Exception as e:
         error_msg = str(e)
