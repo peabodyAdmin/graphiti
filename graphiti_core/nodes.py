@@ -150,6 +150,8 @@ class EpisodicNode(Node):
         description='list of entity edges referenced in this episode',
         default_factory=list,
     )
+    labels: list[str] = Field(default_factory=list, description='descriptive labels for the episode')
+    tags: list[str] = Field(default_factory=list, description='tags for the episode')
 
     async def save(self, driver: AsyncDriver):
         result = await driver.execute_query(
@@ -163,6 +165,8 @@ class EpisodicNode(Node):
             created_at=self.created_at,
             valid_at=self.valid_at,
             source=self.source.value,
+            labels=self.labels,
+            tags=self.tags,
             database_=DEFAULT_DATABASE,
         )
 
@@ -526,6 +530,8 @@ def get_episodic_node_from_record(record: Any) -> EpisodicNode:
         name=record['name'],
         source_description=record['source_description'],
         entity_edges=record['entity_edges'],
+        labels=record['labels'],
+        tags=record['tags'],
     )
 
 

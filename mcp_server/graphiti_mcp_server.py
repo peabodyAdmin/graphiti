@@ -782,6 +782,8 @@ async def add_episode(
     source: str = 'text',
     source_description: str = '',
     uuid: str | None = None,
+    tags: list[str] | None = None,
+    labels: list[str] | None = None,
 ) -> SuccessResponse | ErrorResponse:
     """Add an episode to the Graphiti knowledge graph. This is the primary way to add information to the graph.
 
@@ -801,6 +803,8 @@ async def add_episode(
                                - 'message': For conversation-style content
         source_description (str, optional): Description of the source
         uuid (str, optional): Optional UUID for the episode
+        tags (list[str], optional): List of tags for the episode
+        labels (list[str], optional): List of labels for the episode
 
     Examples:
         # Adding plain text content
@@ -874,7 +878,9 @@ async def add_episode(
             "uuid": uuid,
             "reference_time": datetime.now(timezone.utc),
             "entity_types": ENTITY_TYPES if config.use_custom_entities else {},
-            "update_communities": True  # We'll still build communities after the episode
+            "update_communities": True,
+            "tags": tags or [],
+            "labels": labels or [],
         }
 
         # Initialize queue for this group_id if it doesn't exist

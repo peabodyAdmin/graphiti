@@ -286,6 +286,8 @@ class Graphiti:
         entity_types: dict[str, BaseModel] | None = None,
         previous_episode_uuids: list[str] | None = None,
         telemetry_client = None,
+        tags: list[str] | None = None,
+        labels: list[str] | None = None,
     ) -> AddEpisodeResults:
         """
         Process an episode and update the graph.
@@ -376,7 +378,8 @@ class Graphiti:
                 else EpisodicNode(
                     name=name,
                     group_id=group_id,
-                    labels=[],
+                    labels=labels or [],
+                    tags=tags or [],
                     source=source,
                     content=episode_body,
                     source_description=source_description,
@@ -585,7 +588,8 @@ class Graphiti:
             episodes = [
                 EpisodicNode(
                     name=episode.name,
-                    labels=[],
+                    labels=getattr(episode, 'labels', []),
+                    tags=getattr(episode, 'tags', []),
                     source=episode.source,
                     content=episode.content,
                     source_description=episode.source_description,

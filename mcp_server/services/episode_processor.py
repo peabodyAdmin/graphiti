@@ -64,15 +64,16 @@ async def process_episode_queue(
                 await clients.add_episode(
                     name=episode_data["name"],
                     episode_body=episode_data["episode_body"],
-                    source_description=episode_data.get("source_description", ""),
-                    reference_time=episode_data.get("reference_time", None),
-                    source=episode_data.get("source", "message"),
+                    source=episode_data["source"],
+                    source_description=episode_data["source_description"],
+                    reference_time=episode_data["reference_time"],
                     group_id=group_id,
-                    uuid=episode_data.get("uuid", None),
-                    update_communities=episode_data.get("update_communities", False),
-                    entity_types=episode_data.get("entity_types", None),
-                    previous_episode_uuids=episode_data.get("previous_episode_uuids", None),
-                    telemetry_client=telemetry_client
+                    uuid=episode_data["uuid"],
+                    entity_types=episode_data.get("entity_types"),
+                    update_communities=episode_data.get("update_communities", True),
+                    tags=episode_data.get("tags", []),
+                    labels=episode_data.get("labels", []),
+                    telemetry_client=telemetry_client,
                 )
             
             # Record success
