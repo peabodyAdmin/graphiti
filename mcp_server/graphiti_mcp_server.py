@@ -614,6 +614,22 @@ The episode will be ingested with the following properties:
 - [ ] `tags` and `labels` are populated based on similar episodes
 - [ ] `group_id` is set to `aeon_inception`
 - [ ] Episode is ingested by Graphiti
+
+## 📊 Telemetry Query Best Practices
+
+When working with telemetry data:
+
+1. ALWAYS query telemetry in the 'graphiti_logs' group - all telemetry is stored here regardless of content destination
+2. Start with telemetry_fuzzy_search() using partial names (e.g., "ADR-013") to find relevant episodes
+3. Then use telemetry_episode_trace() with the complete episode name from the search results
+4. Use telemetry_format_results() to create readable summaries from raw telemetry data
+5. Remember that telemetry exists for BOTH successful AND failed ingestions
+6. Content searches only reveal successful ingestions - use telemetry for debugging failures
+
+Example flow:
+1. Find matching episodes: telemetry_fuzzy_search("ADR-013")
+2. Get detailed trace: telemetry_episode_trace(result.episode_name)
+3. Format for readability: telemetry_format_results(trace_data)
 """
 
 # MCP server instance
@@ -1323,6 +1339,11 @@ async def run_mcp_server():
     mcp.tool()(telemetry_episodes_with_error)
     mcp.tool()(telemetry_stats)
     mcp.tool()(telemetry_recent_errors)
+    mcp.tool()(telemetry_lookup_by_content_uuid)
+    mcp.tool()(telemetry_search)
+    mcp.tool()(telemetry_find_content)
+    mcp.tool()(telemetry_fuzzy_search)
+    mcp.tool()(telemetry_format_results)
     
     # Register queue inspection tools
     logger.info('Registering queue inspection tools')
@@ -1351,6 +1372,19 @@ async def run_mcp_server():
 @mcp.tool()
 async def telemetry_episode_trace(episode_name_or_elementId: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
     """Get the full processing trace for an episode.
+    
+    IMPORTANT USAGE NOTES:
+    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
+       regardless of the content's destination group.
+    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
+    3. Use telemetry_fuzzy_search() first to identify relevant episodes when you don't know the exact name.
+    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
+       exists for successful ones - making telemetry critical for debugging.
+    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
+
+    Example usage:
+        telemetry_fuzzy_search("ADR-013")  # First find matching episodes
+        telemetry_episode_trace("ADR-013: Integration of Mem0g...")  # Then get details using full name
     
     Args:
         episode_name_or_elementId: The exact episode name (as stored in Neo4j) or the Neo4j element ID (elementId).
@@ -1438,6 +1472,19 @@ async def telemetry_episode_trace(episode_name_or_elementId: str, content_group_
 async def telemetry_error_patterns() -> TelemetryResponse | ErrorResponse:
     """Get patterns of errors across episodes.
     
+    IMPORTANT USAGE NOTES:
+    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
+       regardless of the content's destination group.
+    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
+    3. Use telemetry_fuzzy_search() first to identify relevant episodes when you don't know the exact name.
+    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
+       exists for successful ones - making telemetry critical for debugging.
+    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
+
+    Example usage:
+        telemetry_fuzzy_search("ADR-013")  # First find matching episodes
+        telemetry_episode_trace("ADR-013: Integration of Mem0g...")  # Then get details using full name
+    
     This tool analyzes all telemetry data to identify common error patterns
     across multiple episodes, helping to identify systematic issues.
     """
@@ -1456,6 +1503,19 @@ async def telemetry_error_patterns() -> TelemetryResponse | ErrorResponse:
 @mcp.tool()
 async def telemetry_episodes_with_error(error_type: str) -> TelemetryResponse | ErrorResponse:
     """Get all episodes affected by a specific error type.
+    
+    IMPORTANT USAGE NOTES:
+    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
+       regardless of the content's destination group.
+    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
+    3. Use telemetry_fuzzy_search() first to identify relevant episodes when you don't know the exact name.
+    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
+       exists for successful ones - making telemetry critical for debugging.
+    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
+
+    Example usage:
+        telemetry_fuzzy_search("ADR-013")  # First find matching episodes
+        telemetry_episode_trace("ADR-013: Integration of Mem0g...")  # Then get details using full name
     
     This tool allows you to find all episodes that experienced a particular type of error,
     helping to understand the impact and scope of specific issues.
@@ -1478,6 +1538,19 @@ async def telemetry_episodes_with_error(error_type: str) -> TelemetryResponse | 
 @mcp.tool()
 async def telemetry_stats() -> TelemetryResponse | ErrorResponse:
     """Get overall episode processing statistics.
+    
+    IMPORTANT USAGE NOTES:
+    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
+       regardless of the content's destination group.
+    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
+    3. Use telemetry_fuzzy_search() first to identify relevant episodes when you don't know the exact name.
+    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
+       exists for successful ones - making telemetry critical for debugging.
+    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
+
+    Example usage:
+        telemetry_fuzzy_search("ADR-013")  # First find matching episodes
+        telemetry_episode_trace("ADR-013: Integration of Mem0g...")  # Then get details using full name
     
     This tool provides summary statistics about all episode processing activities,
     including success rates, failure counts, and average processing times.
@@ -1509,6 +1582,19 @@ async def telemetry_stats() -> TelemetryResponse | ErrorResponse:
 @mcp.tool()
 async def telemetry_recent_errors() -> TelemetryResponse | ErrorResponse:
     """Get the most recent errors from episode processing.
+    
+    IMPORTANT USAGE NOTES:
+    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
+       regardless of the content's destination group.
+    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
+    3. Use telemetry_fuzzy_search() first to identify relevant episodes when you don't know the exact name.
+    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
+       exists for successful ones - making telemetry critical for debugging.
+    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
+
+    Example usage:
+        telemetry_fuzzy_search("ADR-013")  # First find matching episodes
+        telemetry_episode_trace("ADR-013: Integration of Mem0g...")  # Then get details using full name
     
     This tool returns the 20 most recent errors that occurred during episode processing,
     providing a quick view of recent issues.
@@ -1649,6 +1735,201 @@ async def telemetry_find_content(episode_id: str, content_group_id: str = None) 
         logger.error(f"Error finding content for telemetry episode: {e}")
         logger.error(traceback.format_exc())
         return {"error": f"Failed to find content for telemetry episode: {str(e)}"}
+
+
+@mcp.tool()
+async def telemetry_fuzzy_search(
+    partial_name: str,
+    limit: int = 5,
+    include_content_info: bool = True
+) -> TelemetryResponse | ErrorResponse:
+    """Find telemetry episodes by partial name or identifier.
+    
+    IMPORTANT USAGE NOTES:
+    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
+       regardless of the content's destination group.
+    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
+    3. Use this function first to identify relevant episodes when you don't know the exact name.
+    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
+       exists for successful ones - making telemetry critical for debugging.
+    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
+    
+    Args:
+        partial_name: A partial episode name or identifier to search for (e.g., "ADR-013")
+        limit: Maximum number of results to return (default: 5)
+        include_content_info: Whether to include information about related content (default: True)
+        
+    Returns:
+        A list of matching episodes with timestamps and status information
+        
+    Example:
+        telemetry_fuzzy_search("ADR-013")
+    """
+    if not telemetry_client:
+        return {"error": "Telemetry system is not enabled"}
+        
+    try:
+        # Query to find episodes with partial name match in graphiti_logs group
+        query = """
+        MATCH (e)
+        WHERE e.group_id = 'graphiti_logs' AND e.episode_name CONTAINS $partial_name
+        RETURN e.episode_name as episode_name, e.status as status, 
+               e.end_time as end_time, e.processing_time_ms as processing_time_ms,
+               e.client_group_id as client_group_id, id(e) as element_id
+        ORDER BY e.end_time DESC
+        LIMIT $limit
+        """
+        
+        params = {
+            "partial_name": partial_name,
+            "limit": limit
+        }
+        
+        results = await telemetry_client.run_query(query, params)
+        
+        if not results:
+            return {
+                "data": [],
+                "message": f"No telemetry records found matching '{partial_name}'"
+            }
+            
+        # Format results with additional helpful information
+        formatted_results = []
+        for result in results:
+            entry = {
+                "episode_name": result.get("episode_name", "Unknown"),
+                "processed_at": result.get("end_time", "Unknown"),
+                "processing_time_ms": result.get("processing_time_ms", 0),
+                "status": result.get("status", "Unknown"),
+                "client_group_id": result.get("client_group_id", "Unknown"),
+                "element_id": result.get("element_id", "Unknown"),
+            }
+            
+            # Get content info if requested and processing was successful
+            if include_content_info and result.get("status") == "completed" and result.get("client_group_id"):
+                content_info = await telemetry_client.find_related_content(
+                    result.get("episode_name", ""),
+                    content_group_id=result.get("client_group_id")
+                )
+                entry["content_info"] = content_info
+            
+            formatted_results.append(entry)
+            
+        return {
+            "data": formatted_results,
+            "message": f"Found {len(formatted_results)} telemetry records matching '{partial_name}'"
+        }
+    except Exception as e:
+        logger.error(f"Error in telemetry_fuzzy_search: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {"error": f"Failed to search telemetry records: {str(e)}"}
+
+
+@mcp.tool()
+async def telemetry_format_results(
+    episode_data: dict,
+    highlight_errors: bool = True,
+    include_steps: bool = True
+) -> TelemetryResponse | ErrorResponse:
+    """Format telemetry data into a human-readable summary.
+    
+    This function takes the raw telemetry data (typically from telemetry_episode_trace)
+    and formats it into a structured, easy-to-read summary focusing on key information.
+    
+    Args:
+        episode_data: The raw episode data from telemetry_episode_trace
+        highlight_errors: Whether to highlight errors in processing steps (default: True)
+        include_steps: Whether to include detailed processing steps (default: True)
+        
+    Returns:
+        A formatted summary of the telemetry data
+        
+    Example:
+        raw_data = telemetry_episode_trace("ADR-013: Integration of Mem0g...")
+        telemetry_format_results(raw_data["data"])
+    """
+    if not episode_data:
+        return {"error": "No episode data provided"}
+        
+    try:
+        # Extract episode information
+        episode = episode_data.get("episode", {})
+        steps = episode_data.get("steps", [])
+        timeline = episode_data.get("timeline", [])
+        tracking = episode_data.get("tracking", [])
+        outcome_summary = episode_data.get("outcome_summary", {})
+        related_content = episode_data.get("related_content", {})
+        
+        # Create basic summary
+        summary = {
+            "episode_name": episode.get("episode_name", "Unknown"),
+            "status": episode.get("status", "Unknown"),
+            "start_time": episode.get("start_time", "Unknown"),
+            "end_time": episode.get("end_time", "Unknown"),
+            "processing_time_ms": episode.get("processing_time_ms", 0),
+            "client_group_id": episode.get("client_group_id", "Unknown"),
+            "group_id": episode.get("group_id", "Unknown"),
+            "attempt_count": episode.get("attempt_count", 0),
+        }
+        
+        # Add outcome summary
+        if outcome_summary:
+            summary["outcome"] = {
+                "success": outcome_summary.get("success", False),
+                "error_count": outcome_summary.get("error_count", 0),
+                "total_steps": outcome_summary.get("total_steps", 0),
+                "completion_time": outcome_summary.get("completion_time", "Unknown"),
+            }
+        
+        # Add related content summary if available
+        if related_content:
+            content_nodes = related_content.get("content_nodes", [])
+            summary["content"] = {
+                "found": related_content.get("content_found", False),
+                "node_count": len(content_nodes),
+                "nodes": [
+                    {
+                        "name": node.get("name", "Unknown"),
+                        "uuid": node.get("uuid", "Unknown"),
+                        "group_id": node.get("group_id", "Unknown"),
+                        "created_at": node.get("created_at", "Unknown"),
+                    }
+                    for node in content_nodes[:3]  # Limit to first 3 for brevity
+                ]
+            }
+        
+        # Add processing steps if requested
+        if include_steps and steps:
+            # Group steps by name to show progression
+            step_groups = {}
+            for step in steps:
+                step_name = step.get("step_name", "unknown")
+                if step_name not in step_groups:
+                    step_groups[step_name] = []
+                    
+                step_info = {
+                    "status": step.get("status", "unknown"),
+                    "start_time": step.get("start_time", "unknown"),
+                    "end_time": step.get("end_time", "unknown"),
+                    "data": step.get("data", "{}"),
+                }
+                
+                # Highlight errors if requested
+                if highlight_errors and step.get("status") != "success":
+                    step_info["error"] = True
+                    
+                step_groups[step_name].append(step_info)
+            
+            summary["steps"] = step_groups
+        
+        return {
+            "data": summary,
+            "message": f"Formatted telemetry summary for {summary['episode_name']}"
+        }
+    except Exception as e:
+        logger.error(f"Error formatting telemetry results: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {"error": f"Failed to format telemetry results: {str(e)}"}
 
 
 def main():
