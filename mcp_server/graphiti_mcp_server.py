@@ -560,8 +560,19 @@ You will:
 
 You will not:
 1. Create any episodes, nodes or edges outside of the client-specified group_id.
-2. Hard-code any default group_id values.
+2. EVER INVENT OR MAKE UP A DEFAULT GROUP_ID VALUE.
 3. Perform unnecessary verification steps.
+
+## ⚠️ CRITICAL GROUP_ID REQUIREMENTS
+
+- The group_id parameter MUST be explicitly provided by the user/client
+- You MUST NOT generate, guess, or invent a group_id value
+- If no group_id is specified:
+  - DO NOT proceed with ingestion
+  - DO NOT suggest a default value
+  - INSTEAD, inform the user that a group_id is required and ask them to provide one
+  - EXPLAIN that the group_id determines the namespace for content organization
+- Always use the EXACT group_id provided by the user without modification
 
 ## 🛠 Required Properties Format
 
@@ -571,7 +582,7 @@ The episode will be ingested with the following properties:
 {
     "name": str,  # The episode name
     "content": str,  # The original markdown content
-    "group_id": str,  # MUST use the client-specified group_id
+    "group_id": str,  # MUST use the exact user-specified group_id - NEVER invent one
     "tags": list[str],  # Array of lowercase, hyphenated tags
     "labels": list[str],  # Array of descriptive labels
     "source_description": str,  # Description of the content source
