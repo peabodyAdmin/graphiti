@@ -11,7 +11,7 @@ import re
 import sys
 import traceback
 from pathlib import Path
-import uuid
+import uuid as uuid_module
 
 # Add the parent directory to Python's module path so imports like 'mcp_server.xyz' work
 parent_dir = str(Path(__file__).parent.parent)
@@ -808,24 +808,26 @@ async def process_episode_queue(group_id: str):
 async def add_episode(
     name: str,
     episode_body: str,
-    group_id: str,  # Changed from str | None = None to make it required
+    group_id: str | None = None,
     source: str = 'text',
     source_description: str = '',
     uuid: str | None = None,
     tags: list[str] | None = None,
     labels: list[str] | None = None,
-) -> SuccessResponse | ErrorResponse:
-    """Add an episode to the Graphiti knowledge graph. This is the primary way to add information to the graph.
+) -> dict:
+    """Add an episode to the Graphiti knowledge graph.
 
-    This function returns immediately and processes the episode addition in the background.
-    Episodes for the same group_id are processed sequentially to avoid race conditions.
+    This function implements a two-step workflow to ensure proper group_id selection:
+    1. If group_id is provided, it validates the group_id and adds the episode directly
+    2. If group_id is not provided, it suggests a group_id based on content similarity
+       and returns a pending_id for later confirmation
 
     Args:
         name (str): Name of the episode
         episode_body (str): The content of the episode. When source='json', this must be a properly escaped JSON string,
                            not a raw Python dictionary. The JSON data will be automatically processed
                            to extract entities and relationships.
-        group_id (str): A unique ID for this graph. This MUST be specified to determine the namespace for the content.
+        group_id (str, optional): A unique ID for this graph. If not provided, a group_id will be suggested.
         source (str, optional): Source type, must be one of:
                                - 'text': For plain text content (default)
                                - 'json': For structured data
@@ -835,8 +837,16 @@ async def add_episode(
         tags (list[str], optional): List of tags for the episode
         labels (list[str], optional): List of labels for the episode
 
+    Returns:
+        If group_id is provided and valid:
+            SuccessResponse: A success message indicating the episode was queued
+        If group_id is not provided:
+            PendingResponse: Contains pending_id, suggested_group_id, and similar groups
+        If an error occurs:
+            ErrorResponse: An error message
+
     Examples:
-        # Adding plain text content
+        # Direct addition with known group_id
         add_episode(
             name="Company News",
             episode_body="Acme Corp announced a new product line today.",
@@ -845,89 +855,194 @@ async def add_episode(
             group_id="my_company_news"  # Namespace for this content
         )
 
-        # Adding structured JSON data
-        # NOTE: episode_body must be a properly escaped JSON string. Note the triple backslashes
-        add_episode(
-            name="Customer Profile",
-            episode_body="{\\\"company\\\": {\\\"name\\\": \\\"Acme Technologies\\\"}, \\\"products\\\": [{\\\"id\\\": \\\"P001\\\", \\\"name\\\": \\\"CloudSync\\\"}, {\\\"id\\\": \\\"P002\\\", \\\"name\\\": \\\"DataMiner\\\"}]}",
-            source="json",
-            source_description="CRM data",
-            group_id="customer_profiles"  # Namespace for this content
+        # Two-step workflow (first call)
+        result = add_episode(
+            name="Customer Feedback",
+            episode_body="The new interface is much easier to use.",
+            source="text",
+            source_description="feedback form"
+            # No group_id provided - will get suggestions
         )
+        # result contains pending_id and suggested_group_id
 
-        # Adding message-style content
-        add_episode(
-            name="Customer Conversation",
-            episode_body="user: What's your return policy?\nassistant: You can return items within 30 days.",
-            source="message",
-            source_description="chat transcript",
-            group_id="customer_support"  # Namespace for this content
+        # Two-step workflow (second call using continue_episode_ingestion)
+        continue_episode_ingestion(
+            pending_id=result["pending_id"],
+            group_id=result["suggested_group_id"]
         )
-
-    Notes:
-        When using source='json':
-        - The JSON must be a properly escaped string, not a raw Python dictionary
-        - The JSON will be automatically processed to extract entities and relationships
-        - Complex nested structures are supported (arrays, nested objects, mixed data types), but keep nesting to a minimum
-        - Entities will be created from appropriate JSON properties
-        - Relationships between entities will be established based on the JSON structure
     """
-    global graphiti_client, episode_queues, queue_workers
-
-    if graphiti_client is None:
-        return {'error': 'Graphiti client not initialized'}
-
-    # Enforce group_id requirement
-    if not group_id:
-        return {'error': 'group_id must be specified to determine the namespace for this content'}
-
     try:
         # Map string source to EpisodeType enum
+        from graphiti_core.nodes import EpisodeType
         source_type = EpisodeType.text
-        if source.lower() == 'message':
-            source_type = EpisodeType.message
-        elif source.lower() == 'json':
-            source_type = EpisodeType.json
+        if isinstance(source, str):
+            try:
+                source_type = EpisodeType.from_str(source)
+            except Exception:
+                source_type = EpisodeType.text
+        else:
+            source_type = source
 
-        # Use the provided group_id directly, without falling back to a default
-        group_id_str = str(group_id)
+        # Get the current time
+        now = datetime.now(timezone.utc)
 
-        # We've already checked that graphiti_client is not None above
-        # This assert statement helps type checkers understand that graphiti_client is defined
-        assert graphiti_client is not None, 'graphiti_client should not be None here'
+        # Create a unique ID for this episode if not provided
+        episode_uuid = uuid if uuid else str(uuid_module.uuid4())
 
-        # Use cast to help the type checker understand that graphiti_client is not None
-        client = cast(Graphiti, graphiti_client)
+        # Create a list of tags if provided
+        episode_tags = tags if tags else []
 
-        # Prepare the episode data for the queue
+        # Create a list of labels if provided
+        episode_labels = labels if labels else []
+
+        # Direct path: If group_id is provided, validate and process directly
+        if group_id:
+            # Check if group registry exists and validate group_id
+            from services.group_registry import GroupRegistry
+            registry = GroupRegistry(graphiti_client.driver)
+            
+            # Initialize registry if not already done
+            await registry.initialize()
+            
+            # Check if group_id is valid format
+            if not registry._is_valid_group_id(group_id):
+                return {'error': f'Invalid group_id format: {group_id}. Must be at least 3 characters, start with a letter, and contain only alphanumeric characters, underscores, and hyphens.'}
+            
+            # Prepare the episode data
+            episode_data = {
+                'name': name,
+                'episode_body': episode_body,
+                'source': source_type,  # PATCH: always use enum
+                'source_description': source_description,
+                'reference_time': now,
+                'uuid': episode_uuid,
+                'tags': episode_tags,
+                'labels': episode_labels,
+            }
+
+            # Get or create a queue for this group_id
+            if group_id not in episode_queues:
+                episode_queues[group_id] = asyncio.Queue()
+                # Start a task to process episodes for this group_id
+                asyncio.create_task(process_episode_queue(group_id))
+
+            # Add the episode to the queue
+            await episode_queues[group_id].put(episode_data)
+
+            # Register the group if it doesn't exist yet
+            group_info = await registry.get_group(group_id)
+            if not group_info:
+                await registry.register_group(
+                    group_id=group_id,
+                    description=f"Auto-created group for {name}",
+                    creator="system"
+                )
+
+            return {'message': f'Episode added to queue for processing in group: {group_id}'}
+        else:
+            # Import similarity search
+            from services.episode_similarity import find_similar_episodes
+            
+            # Find similar episodes and get group suggestions
+            similarity_result = await find_similar_episodes(
+                graphiti=graphiti_client,
+                name=name,
+                content=episode_body,
+            )
+            
+            # Store as pending episode
+            from services.pending_episodes import PendingEpisodesStorage
+            pending_storage = PendingEpisodesStorage()
+            
+            pending_id = pending_storage.store_pending_episode(
+                name=name,
+                episode_body=episode_body,
+                source=source_type.value,  # PATCH: store as string for serialization
+                source_description=source_description,
+                suggested_group_id=similarity_result.suggested_group_id,
+                similar_groups=similarity_result.similar_groups,
+                uuid=episode_uuid,
+                tags=episode_tags,
+                labels=episode_labels,
+            )
+            
+            # Return pending information for continuation
+            return {
+                'pending': True,
+                'pending_id': pending_id,
+                'suggested_group_id': similarity_result.suggested_group_id,
+                'similar_groups': similarity_result.similar_groups,
+                'message': 'Episode is pending group_id confirmation. Use continue_episode_ingestion to complete processing.'
+            }
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f'Error in add_episode: {error_msg}', exc_info=True)
+        return {'error': f'Error processing episode: {error_msg}'}
+
+
+@mcp.tool()
+async def continue_episode_ingestion(
+    pending_id: str,
+    group_id: str,
+) -> SuccessResponse | ErrorResponse:
+    """Continue the ingestion of a pending episode.
+
+    Args:
+        pending_id (str): The ID of the pending episode
+        group_id (str): The selected group_id for the episode
+    """
+    try:
+        # Get the pending episode data
+        from services.pending_episodes import PendingEpisodesStorage
+        from graphiti_core.nodes import EpisodeType
+        pending_storage = PendingEpisodesStorage()
+        pending_episode = pending_storage.get_pending_episode(pending_id)
+        if not pending_episode:
+            return {'error': f'Pending episode not found: {pending_id}'}
+        # Validate the group_id
+        from services.group_registry import GroupRegistry
+        registry = GroupRegistry(graphiti_client.driver)
+        if not registry._is_valid_group_id(group_id):
+            return {'error': f'Invalid group_id format: {group_id}. Must be at least 3 characters, start with a letter, and contain only alphanumeric characters, underscores, and hyphens.'}
+        # PATCH: Convert source to EpisodeType
+        try:
+            source_type = EpisodeType.from_str(pending_episode.source)
+        except Exception:
+            source_type = EpisodeType.text
+        # Prepare the episode data
         episode_data = {
-            "name": name,
-            "episode_body": episode_body,
-            "source": source_type,
-            "source_description": source_description,
-            "uuid": uuid,
-            "reference_time": datetime.now(timezone.utc),
-            "entity_types": ENTITY_TYPES if config.use_custom_entities else {},
-            "update_communities": True,
-            "tags": tags or [],
-            "labels": labels or [],
+            'name': pending_episode.name,
+            'episode_body': pending_episode.episode_body,
+            'source': source_type,  # PATCH: always use enum
+            'source_description': pending_episode.source_description,
+            'reference_time': pending_episode.created_at,
+            'uuid': pending_episode.uuid,
+            'tags': pending_episode.tags or [],
+            'labels': pending_episode.labels or [],
         }
 
         # Initialize queue for this group_id if it doesn't exist
-        if group_id_str not in episode_queues:
-            episode_queues[group_id_str] = asyncio.Queue()
-
-        # Add the episode data to the queue
-        await episode_queues[group_id_str].put(episode_data)
-
-        # Start a worker for this queue if one isn't already running
-        if not queue_workers.get(group_id_str, False):
-            asyncio.create_task(process_episode_queue(group_id_str))
-
-        # Return immediately with a success message
-        return {
-            'message': f"Episode '{name}' queued for processing in group '{group_id_str}' (position: {episode_queues[group_id_str].qsize()})"
-        }
+        if group_id not in episode_queues:
+            episode_queues[group_id] = asyncio.Queue()
+            # Start a task to process episodes for this group_id
+            asyncio.create_task(process_episode_queue(group_id))
+            
+        # Register the group if it doesn't exist yet
+        group_info = await registry.get_group(group_id)
+        if not group_info:
+            await registry.register_group(
+                group_id=group_id,
+                description=f"Group for {pending_episode.name}",
+                creator="user"
+            )
+            
+        # Add the episode to the queue
+        await episode_queues[group_id].put(episode_data)
+        
+        # Delete the pending episode
+        pending_storage.delete_pending_episode(pending_id)
+        
+        return {'message': f'Episode added to queue for processing in group: {group_id} (position: {episode_queues[group_id].qsize()})'}
     except Exception as e:
         error_msg = str(e)
         logger.error(f'Error queuing episode task: {error_msg}')
@@ -1337,6 +1452,7 @@ async def run_mcp_server():
     
     # Core knowledge graph tools
     mcp.tool()(add_episode)
+    mcp.tool()(continue_episode_ingestion)  # Add the continuation tool for the two-step workflow
     mcp.tool()(search_nodes)
     mcp.tool()(search_facts)
     mcp.tool()(get_entity_edge)
@@ -1363,6 +1479,10 @@ async def run_mcp_server():
     logger.info('Registering queue inspection tools')
     mcp.tool()(get_queue_stats)
     mcp.tool()(get_job_by_index)
+    
+    # Register group registry tools
+    logger.info('Registering group registry tools')
+    mcp.tool()(list_group_registry)
 
     # Get transport config from mcp_config, don't rely on settings object
     transport = mcp_config.transport
@@ -1945,6 +2065,68 @@ async def telemetry_format_results(
         logger.error(traceback.format_exc())
         return {"error": f"Failed to format telemetry results: {str(e)}"}
 
+
+# register_group tool removed to enforce the two-step workflow
+# Groups are now registered automatically through the add_episode and continue_episode_ingestion process
+
+@mcp.tool()
+async def list_group_registry(
+    include_protected: bool = False,
+    include_stats: bool = True,
+) -> dict[str, Any] | ErrorResponse:
+    """List all registered groups in the system.
+    
+    This function returns information about all registered groups, including
+    their descriptions, creation timestamps, and usage statistics.
+    
+    Args:
+        include_protected (bool, optional): Whether to include protected system groups
+        include_stats (bool, optional): Whether to include usage statistics
+        
+    Returns:
+        Dictionary with groups information or error response
+    """
+    try:
+        # Initialize the group registry
+        from services.group_registry import GroupRegistry
+        registry = GroupRegistry(graphiti_client.driver)
+        await registry.initialize()
+        
+        # Get all groups
+        groups = await registry.list_groups(include_protected=include_protected)
+        
+        # Format the response
+        formatted_groups = []
+        for group in groups:
+            group_info = {
+                'group_id': group.get('group_id', ''),
+                'description': group.get('description', ''),
+                'created_at': group.get('created_at', ''),
+                'creator': group.get('creator', 'system'),
+            }
+            
+            # Add metadata fields
+            for key, value in group.items():
+                if key not in ['group_id', 'description', 'created_at', 'creator', 'usage_stats']:
+                    group_info[key] = value
+            
+            # Add usage stats if requested
+            if include_stats and 'usage_stats' in group:
+                group_info['usage_stats'] = group['usage_stats']
+                
+            formatted_groups.append(group_info)
+        
+        return {
+            'groups': formatted_groups,
+            'count': len(formatted_groups),
+            'message': f'Found {len(formatted_groups)} groups'
+        }
+    except Exception as e:
+        logger.error(f'Error in list_group_registry: {str(e)}', exc_info=True)
+        return {'error': f'Failed to list groups: {str(e)}'}
+
+
+# populate_initial_registry tool removed - letting group registry grow organically via ingestion
 
 def main():
     """Main function to run the Graphiti MCP server."""

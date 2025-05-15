@@ -36,6 +36,7 @@ from graphiti_core.cross_encoder.client import CrossEncoderClient
 from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from graphiti_core.edges import EntityEdge, EpisodicEdge
 from graphiti_core.embedder import EmbedderClient, OpenAIEmbedder
+from graphiti_core.errors import NodeNotFoundError
 from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.helpers import DEFAULT_DATABASE, semaphore_gather
 from graphiti_core.llm_client import LLMClient, OpenAIClient
@@ -372,10 +373,40 @@ class Graphiti:
                     data={"episode_count": len(previous_episodes)}
                 )
 
-            episode = (
-                await EpisodicNode.get_by_uuid(self.driver, uuid)
-                if uuid is not None
-                else EpisodicNode(
+            # Get or create episode node
+            try:
+                if uuid is not None:
+                    try:
+                        episode = await EpisodicNode.get_by_uuid(self.driver, uuid)
+                    except NodeNotFoundError:
+                        # If episode doesn't exist, create a new one with the provided UUID
+                        episode = EpisodicNode(
+                            name=name,
+                            group_id=group_id,
+                            labels=labels or [],
+                            tags=tags or [],
+                            source=source,
+                            content=episode_body,
+                            source_description=source_description,
+                            created_at=now,
+                            valid_at=reference_time,
+                            uuid=uuid  # Use the provided UUID
+                        )
+                else:
+                    episode = EpisodicNode(
+                        name=name,
+                        group_id=group_id,
+                        labels=labels or [],
+                        tags=tags or [],
+                        source=source,
+                        content=episode_body,
+                        source_description=source_description,
+                        created_at=now,
+                        valid_at=reference_time,
+                    )
+            except NodeNotFoundError:
+                # This should not be reached, as we handle NodeNotFoundError above, but just in case
+                episode = EpisodicNode(
                     name=name,
                     group_id=group_id,
                     labels=labels or [],
@@ -385,8 +416,8 @@ class Graphiti:
                     source_description=source_description,
                     created_at=now,
                     valid_at=reference_time,
+                    uuid=uuid
                 )
-            )
 
             # Extract entities as nodes
             if telemetry_client:
@@ -543,7 +574,6 @@ class Graphiti:
                 )
             raise e
 
-    #### WIP: USE AT YOUR OWN RISK ####
     async def add_episode_bulk(self, bulk_episodes: list[RawEpisode], group_id: str = '', telemetry_client = None):
         """
         Process multiple episodes in bulk and update the graph.
@@ -561,25 +591,6 @@ class Graphiti:
         Returns
         -------
         None
-
-        Notes
-        -----
-        This method performs several steps including:
-        - Saving all episodes to the database
-        - Retrieving previous episode context for each new episode
-        - Extracting nodes and edges from all episodes
-        - Generating embeddings for nodes and edges
-        - Deduplicating nodes and edges
-        - Saving nodes, episodic edges, and entity edges to the knowledge graph
-
-        This bulk operation is designed for efficiency when processing multiple episodes
-        at once. However, it's important to ensure that the bulk operation doesn't
-        overwhelm system resources. Consider implementing rate limiting or chunking for
-        very large batches of episodes.
-
-        Important: This method does not perform edge invalidation or date extraction steps.
-        If these operations are required, use the `add_episode` method instead for each
-        individual episode.
         """
         try:
             start = time()
@@ -722,20 +733,14 @@ class Graphiti:
             # Record error in telemetry
             if telemetry_client:
                 import traceback
-                current_step = "unknown"  # We don't know exactly where it failed
-                for episode_data in bulk_episodes:
-                    await telemetry_client.record_error(
-                        episode_name=episode_data.name,
-                        step_name=current_step,
-                        error_type=type(e).__name__,
-                        error_message=str(e),
-                        stack_trace=traceback.format_exc()
-                    )
-                    # Mark episode as failed
-                    await telemetry_client.record_episode_completion(
-                        episode_name=episode_data.name,
-                        status="failed"
-                    )
+                current_step = "bulk_episode_processing"
+                await telemetry_client.record_error(
+                    episode_name="bulk_episode_processing",
+                    step_name=current_step,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    stack_trace=traceback.format_exc()
+                )
             raise e
 
     async def build_communities(self, group_ids: list[str] | None = None) -> list[CommunityNode]:
