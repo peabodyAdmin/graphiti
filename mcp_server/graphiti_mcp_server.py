@@ -1851,10 +1851,10 @@ async def telemetry_fuzzy_search(
     Args:
         partial_name: A partial episode name or identifier to search for (e.g., "ADR-013")
         limit: Maximum number of results to return (default: 1)
-        include_content_info: Whether to include information about related content (default: True)
+        include_content_info: (ignored, kept for compatibility)
         
     Returns:
-        A single telemetry node from the graphiti_logs group
+        A list of telemetry nodes from the graphiti_logs group, each including its elementId
         
     Example:
         telemetry_fuzzy_search("Caviar and Pancake")
@@ -1863,7 +1863,7 @@ async def telemetry_fuzzy_search(
         return {"error": "Telemetry system is not enabled"}
         
     try:
-        # Query to find the single most complete record
+        # Query to find the most complete records
         query = """
         MATCH (e)
         WHERE e.group_id = 'graphiti_logs' 
@@ -1882,13 +1882,14 @@ async def telemetry_fuzzy_search(
                e.processing_time_ms as processing_time_ms,
                e.client_group_id as client_group_id,
                e.tracking_id as tracking_id,
-               id(e) as element_id
+               id(e) as elementId
         ORDER BY e.end_time DESC
-        LIMIT 1
+        LIMIT $limit
         """
         
         params = {
-            "partial_name": partial_name
+            "partial_name": partial_name,
+            "limit": limit
         }
         
         results = await telemetry_client.run_query(query, params)
@@ -1899,31 +1900,23 @@ async def telemetry_fuzzy_search(
                 "message": f"No telemetry records found matching '{partial_name}'"
             }
             
-        # Format the single result
-        result = results[0]
-        entry = {
-            "original_name": result.get("original_name", "Unknown"),
-            "episode_name": result.get("episode_name", "Unknown"),
-            "status": result.get("status", "Unknown"),
-            "start_time": result.get("start_time", "Unknown"),
-            "end_time": result.get("end_time", "Unknown"),
-            "processing_time_ms": result.get("processing_time_ms", 0),
-            "client_group_id": result.get("client_group_id", "Unknown"),
-            "tracking_id": result.get("tracking_id", "Unknown"),
-            "element_id": result.get("element_id", "Unknown")
-        }
-        
-        # Get content info if requested and processing was successful
-        if include_content_info and result.get("status") == "completed" and result.get("client_group_id"):
-            content_info = await telemetry_client.find_related_content(
-                result.get("episode_name", ""),
-                content_group_id=result.get("client_group_id")
-            )
-            entry["content_info"] = content_info
-            
+        entries = []
+        for result in results:
+            entry = {
+                "original_name": result.get("original_name", "Unknown"),
+                "episode_name": result.get("episode_name", "Unknown"),
+                "status": result.get("status", "Unknown"),
+                "start_time": result.get("start_time", "Unknown"),
+                "end_time": result.get("end_time", "Unknown"),
+                "processing_time_ms": result.get("processing_time_ms", 0),
+                "client_group_id": result.get("client_group_id", "Unknown"),
+                "tracking_id": result.get("tracking_id", "Unknown"),
+                "elementId": result.get("elementId", "Unknown")
+            }
+            entries.append(entry)
         return {
-            "data": [entry],
-            "message": f"Found telemetry record for '{partial_name}'"
+            "data": entries,
+            "message": f"Found {len(entries)} telemetry record(s) for '{partial_name}'"
         }
     except Exception as e:
         logger.error(f"Error in telemetry_fuzzy_search: {str(e)}")
@@ -2117,3 +2110,64 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+@mcp.tool()
+async def telemetry_enumerate_connected_nodes(elementId: str) -> TelemetryResponse | ErrorResponse:
+    """Enumerate all nodes directly connected to a telemetry log node by elementId.
+    Returns the log node, all directly connected nodes, and the relationships (both incoming and outgoing).
+    Args:
+        elementId: The Neo4j element ID of the telemetry log node (can be numeric or compound)
+    Returns:
+        Dictionary with the log node, a list of connected nodes, and their relationships.
+    """
+    if not telemetry_client:
+        return {"error": "Telemetry system is not enabled"}
+    try:
+        # Extract numeric ID from compound ID if needed
+        numeric_id = elementId
+        if ':' in elementId:
+            numeric_id = elementId.split(':')[-1]
+        numeric_id = int(numeric_id)
+
+        # Query for the log node and all directly connected nodes (both directions)
+        query = '''
+        MATCH (log)
+        WHERE id(log) = $elementId AND log.group_id = 'graphiti_logs'
+        OPTIONAL MATCH (log)-[r_out]->(n_out)
+        OPTIONAL MATCH (n_in)-[r_in]->(log)
+        RETURN log,
+               collect(DISTINCT {direction: 'out', rel_type: type(r_out), node: n_out}) AS outgoing,
+               collect(DISTINCT {direction: 'in', rel_type: type(r_in), node: n_in}) AS incoming
+        '''
+        results = await telemetry_client.run_query(query, {"elementId": numeric_id})
+        if not results or not results[0].get('log'):
+            return {"error": f"No telemetry log node found for element ID: {elementId}"}
+        log_node = results[0]['log']
+        outgoing = [rel for rel in results[0]['outgoing'] if rel['node'] is not None]
+        incoming = [rel for rel in results[0]['incoming'] if rel['node'] is not None]
+        # Format nodes for output (convert datetimes to isoformat)
+        def format_node(node):
+            if not node:
+                return None
+            return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in node.items()}
+        formatted_log = format_node(log_node)
+        formatted_outgoing = [
+            {"direction": rel['direction'], "rel_type": rel['rel_type'], "node": format_node(rel['node'])}
+            for rel in outgoing
+        ]
+        formatted_incoming = [
+            {"direction": rel['direction'], "rel_type": rel['rel_type'], "node": format_node(rel['node'])}
+            for rel in incoming
+        ]
+        return {
+            "data": {
+                "log_node": formatted_log,
+                "outgoing": formatted_outgoing,
+                "incoming": formatted_incoming
+            },
+            "message": f"Enumerated all directly connected nodes for telemetry log {elementId}"
+        }
+    except Exception as e:
+        logger.error(f"Error enumerating connected telemetry nodes: {e}")
+        logger.error(traceback.format_exc())
+        return {"error": f"Failed to enumerate connected telemetry nodes: {str(e)}"}
