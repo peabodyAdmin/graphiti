@@ -1504,97 +1504,51 @@ async def run_mcp_server():
 
 
 @mcp.tool()
-async def telemetry_episode_trace(episode_name_or_elementId: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
-    """Get the full processing trace for an episode.
-    
-    IMPORTANT USAGE NOTES:
-    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
-       regardless of the content's destination group.
-    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
-    3. Use telemetry_fuzzy_search() first to identify relevant episodes when you don't know the exact name.
-    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
-       exists for successful ones - making telemetry critical for debugging.
-    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
-
-    Example usage:
-        telemetry_fuzzy_search("ADR-013")  # First find matching episodes
-        telemetry_episode_trace("ADR-013: Integration of Mem0g...")  # Then get details using full name
+async def telemetry_episode_trace(element_id: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
+    """Get the full processing trace for a telemetry node by its Neo4j element ID.
     
     Args:
-        episode_name_or_elementId: The exact episode name (as stored in Neo4j) or the Neo4j element ID (elementId).
-            - This is NOT the episode's UUID.
-            - If you only have the episode's UUID, first look up the episode and use its name.
-            - Example: 'Indiana Jones Character Summary' or '4:1105c001-9aca-44df-b787-08a8d10a5d70:40'
+        element_id: The Neo4j element ID of the telemetry node (e.g., "494")
         content_group_id: Optional content group_id to search for related content. 
-                          If not provided, will use the client_group_id from telemetry.
+                         If not provided, will use the client_group_id from telemetry.
     """
     if not telemetry_client:
         return {"error": "Telemetry system is not enabled"}
         
     try:
-        logger.info(f"Looking up telemetry for episode identifier: {episode_name_or_elementId}")
+        # Direct lookup by element ID
+        query = """
+        MATCH (e) WHERE id(e) = $element_id AND e.group_id = 'graphiti_logs'
+        RETURN e as episode
+        """
         
-        # First try to get episode info directly using the identifier
-        episode_info = await telemetry_client.get_episode_info(episode_name_or_elementId)
+        results = await telemetry_client.run_query(query, {"element_id": int(element_id)})
         
-        if not episode_info or not episode_info.get('episode'):
-            # If that fails and it looks like a UUID, try the ID lookup
-            is_uuid_format = bool(re.match(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', episode_name_or_elementId))
+        if not results or not results[0].get('episode'):
+            return {"error": f"No telemetry data found for element ID: {element_id}"}
             
-            if is_uuid_format or ':' in episode_name_or_elementId:
-                # Direct Neo4j ID lookup using the graph database ID
-                logger.info(f"Attempting Neo4j direct ID lookup for: {episode_name_or_elementId}")
-                query = """
-                MATCH (l) WHERE l.group_id = 'graphiti_logs'
-                RETURN l as episode, id(l) as node_id
-                """
-                
-                # Execute query directly since we need all nodes to filter manually
-                all_nodes = await telemetry_client.run_query(query)
-                
-                # Find matching node by ID
-                matched_node = None
-                uuid_part = episode_name_or_elementId.split(':')[1] if ':' in episode_name_or_elementId else episode_name_or_elementId
-                
-                if all_nodes:
-                    logger.info(f"Found {len(all_nodes)} telemetry records, searching for UUID part: {uuid_part}")
-                    for node in all_nodes:
-                        node_id_str = str(node.get('node_id', ''))
-                        if node_id_str == uuid_part or uuid_part in node_id_str:
-                            matched_node = node.get('episode')
-                            logger.info(f"Found matching node by ID: {matched_node}")
-                            break
-                
-                if matched_node:
-                    # Format the episode data
-                    episode_info = {'episode': {}}
-                    # Convert node to dict and handle datetime objects
-                    for key, value in matched_node.items():
-                        if isinstance(value, datetime):
-                            episode_info['episode'][key] = value.isoformat()
-                        else:
-                            episode_info['episode'][key] = value
-                            
-                    # Get the actual episode_id for related content
-                    actual_episode_id = matched_node.get('episode_name', episode_name_or_elementId)
-                else:
-                    return {"error": "No telemetry data found matching Neo4j elementId or UUID. Please use the episode name or Neo4j elementId. If you only have the episode UUID, look up the episode and use its name."}
+        # Get the episode data
+        episode = results[0]['episode']
+        
+        # Format the episode data
+        episode_info = {'episode': {}}
+        for key, value in episode.items():
+            if isinstance(value, datetime):
+                episode_info['episode'][key] = value.isoformat()
             else:
-                return {"error": f"No telemetry data found for episode name: {episode_name_or_elementId}. Please use the exact episode name as stored in Neo4j or the Neo4j elementId."}
-        else:
-            actual_episode_id = episode_name_or_elementId
+                episode_info['episode'][key] = value
         
         # Find related content if processing was successful
-        if episode_info.get("episode", {}).get("status") == "completed":
+        if episode_info['episode'].get('status') == 'completed':
             related_content = await telemetry_client.find_related_content(
-                actual_episode_id, 
-                content_group_id=content_group_id
+                episode_info['episode'].get('episode_name', ''),
+                content_group_id=content_group_id or episode_info['episode'].get('client_group_id')
             )
-            episode_info["related_content"] = related_content
+            episode_info['related_content'] = related_content
         
         return {
-            "data": episode_info, 
-            "message": f"Retrieved telemetry trace for episode: {episode_name_or_elementId}"
+            "data": episode_info,
+            "message": f"Retrieved telemetry trace for element ID: {element_id}"
         }
     except Exception as e:
         logger.error(f"Error retrieving episode trace: {e}")
