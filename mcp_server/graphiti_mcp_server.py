@@ -1874,49 +1874,52 @@ async def telemetry_find_content(episode_id: str, content_group_id: str = None) 
 @mcp.tool()
 async def telemetry_fuzzy_search(
     partial_name: str,
-    limit: int = 5,
+    limit: int = 1,
     include_content_info: bool = True
 ) -> TelemetryResponse | ErrorResponse:
     """Find telemetry episodes by partial name or identifier.
     
-    IMPORTANT USAGE NOTES:
-    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
-       regardless of the content's destination group.
-    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
-    3. Use this function first to identify relevant episodes when you don't know the exact name.
-    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
-       exists for successful ones - making telemetry critical for debugging.
-    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
-    
     Args:
         partial_name: A partial episode name or identifier to search for (e.g., "ADR-013")
-        limit: Maximum number of results to return (default: 5)
+        limit: Maximum number of results to return (default: 1)
         include_content_info: Whether to include information about related content (default: True)
         
     Returns:
-        A list of matching episodes with timestamps and status information
+        A single telemetry node from the graphiti_logs group
         
     Example:
-        telemetry_fuzzy_search("ADR-013")
+        telemetry_fuzzy_search("Caviar and Pancake")
     """
     if not telemetry_client:
         return {"error": "Telemetry system is not enabled"}
         
     try:
-        # Query to find episodes with partial name match in graphiti_logs group
+        # Query to find the single most complete record
         query = """
         MATCH (e)
-        WHERE e.group_id = 'graphiti_logs' AND e.episode_name CONTAINS $partial_name
-        RETURN e.episode_name as episode_name, e.status as status, 
-               e.end_time as end_time, e.processing_time_ms as processing_time_ms,
-               e.client_group_id as client_group_id, id(e) as element_id
+        WHERE e.group_id = 'graphiti_logs' 
+        AND (
+            e.original_name CONTAINS $partial_name OR
+            e.episode_name CONTAINS $partial_name
+        )
+        AND e.start_time IS NOT NULL
+        AND e.end_time IS NOT NULL
+        AND e.client_group_id IS NOT NULL
+        RETURN e.original_name as original_name,
+               e.episode_name as episode_name,
+               e.status as status,
+               e.start_time as start_time,
+               e.end_time as end_time,
+               e.processing_time_ms as processing_time_ms,
+               e.client_group_id as client_group_id,
+               e.tracking_id as tracking_id,
+               id(e) as element_id
         ORDER BY e.end_time DESC
-        LIMIT $limit
+        LIMIT 1
         """
         
         params = {
-            "partial_name": partial_name,
-            "limit": limit
+            "partial_name": partial_name
         }
         
         results = await telemetry_client.run_query(query, params)
@@ -1927,31 +1930,31 @@ async def telemetry_fuzzy_search(
                 "message": f"No telemetry records found matching '{partial_name}'"
             }
             
-        # Format results with additional helpful information
-        formatted_results = []
-        for result in results:
-            entry = {
-                "episode_name": result.get("episode_name", "Unknown"),
-                "processed_at": result.get("end_time", "Unknown"),
-                "processing_time_ms": result.get("processing_time_ms", 0),
-                "status": result.get("status", "Unknown"),
-                "client_group_id": result.get("client_group_id", "Unknown"),
-                "element_id": result.get("element_id", "Unknown"),
-            }
-            
-            # Get content info if requested and processing was successful
-            if include_content_info and result.get("status") == "completed" and result.get("client_group_id"):
-                content_info = await telemetry_client.find_related_content(
-                    result.get("episode_name", ""),
-                    content_group_id=result.get("client_group_id")
-                )
-                entry["content_info"] = content_info
-            
-            formatted_results.append(entry)
+        # Format the single result
+        result = results[0]
+        entry = {
+            "original_name": result.get("original_name", "Unknown"),
+            "episode_name": result.get("episode_name", "Unknown"),
+            "status": result.get("status", "Unknown"),
+            "start_time": result.get("start_time", "Unknown"),
+            "end_time": result.get("end_time", "Unknown"),
+            "processing_time_ms": result.get("processing_time_ms", 0),
+            "client_group_id": result.get("client_group_id", "Unknown"),
+            "tracking_id": result.get("tracking_id", "Unknown"),
+            "element_id": result.get("element_id", "Unknown")
+        }
+        
+        # Get content info if requested and processing was successful
+        if include_content_info and result.get("status") == "completed" and result.get("client_group_id"):
+            content_info = await telemetry_client.find_related_content(
+                result.get("episode_name", ""),
+                content_group_id=result.get("client_group_id")
+            )
+            entry["content_info"] = content_info
             
         return {
-            "data": formatted_results,
-            "message": f"Found {len(formatted_results)} telemetry records matching '{partial_name}'"
+            "data": [entry],
+            "message": f"Found telemetry record for '{partial_name}'"
         }
     except Exception as e:
         logger.error(f"Error in telemetry_fuzzy_search: {str(e)}")
