@@ -1504,11 +1504,13 @@ async def run_mcp_server():
 
 
 @mcp.tool()
-async def telemetry_episode_trace(element_id: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
+async def telemetry_episode_trace(elementId: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
     """Get the full processing trace for a telemetry node by its Neo4j element ID.
     
     Args:
-        element_id: The Neo4j element ID of the telemetry node (e.g., "494")
+        elementId: The Neo4j element ID of the telemetry node. Can be:
+                  - Just the numeric ID (e.g., "494")
+                  - A compound ID (e.g., "4:1105c001-9aca-44df-b787-08a8d10a5d70:494")
         content_group_id: Optional content group_id to search for related content. 
                          If not provided, will use the client_group_id from telemetry.
     """
@@ -1516,16 +1518,21 @@ async def telemetry_episode_trace(element_id: str, content_group_id: str = None)
         return {"error": "Telemetry system is not enabled"}
         
     try:
+        # Extract numeric ID from compound ID if needed
+        numeric_id = elementId
+        if ':' in elementId:
+            numeric_id = elementId.split(':')[-1]
+            
         # Direct lookup by element ID
         query = """
-        MATCH (e) WHERE id(e) = $element_id AND e.group_id = 'graphiti_logs'
+        MATCH (e) WHERE id(e) = $elementId AND e.group_id = 'graphiti_logs'
         RETURN e as episode
         """
         
-        results = await telemetry_client.run_query(query, {"element_id": int(element_id)})
+        results = await telemetry_client.run_query(query, {"elementId": int(numeric_id)})
         
         if not results or not results[0].get('episode'):
-            return {"error": f"No telemetry data found for element ID: {element_id}"}
+            return {"error": f"No telemetry data found for element ID: {elementId}"}
             
         # Get the episode data
         episode = results[0]['episode']
@@ -1548,7 +1555,7 @@ async def telemetry_episode_trace(element_id: str, content_group_id: str = None)
         
         return {
             "data": episode_info,
-            "message": f"Retrieved telemetry trace for element ID: {element_id}"
+            "message": f"Retrieved telemetry trace for element ID: {elementId}"
         }
     except Exception as e:
         logger.error(f"Error retrieving episode trace: {e}")
@@ -1788,14 +1795,11 @@ async def telemetry_search(search_term: str, limit: int = 5, client_group_id: st
 
 
 @mcp.tool()
-async def telemetry_find_content(episode_id: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
+async def telemetry_find_content(element_id: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
     """Find content created from a telemetry episode.
     
-    This tool helps bridge the gap between telemetry records and the actual content
-    that was created as a result of successful processing.
-    
     Args:
-        episode_id: The ID of the telemetry episode to find content for
+        element_id: The Neo4j element ID of the telemetry node (e.g., "494")
         content_group_id: Optional content group_id to search within. If not provided, 
                          will use the client_group_id from the telemetry record.
     """
@@ -1803,26 +1807,37 @@ async def telemetry_find_content(episode_id: str, content_group_id: str = None) 
         return {"error": "Telemetry system is not enabled"}
     
     try:
-        # Find related content
+        # First get the telemetry record to get the episode name
+        query = """
+        MATCH (e) WHERE id(e) = $element_id AND e.group_id = 'graphiti_logs'
+        RETURN e.episode_name as episode_name, e.client_group_id as client_group_id
+        """
+        
+        results = await telemetry_client.run_query(query, {"element_id": int(element_id)})
+        
+        if not results or not results[0].get('episode_name'):
+            return {"error": f"No telemetry record found for element ID: {element_id}"}
+            
+        # Find related content using the episode name
         related_content = await telemetry_client.find_related_content(
-            episode_id,
-            content_group_id=content_group_id
+            results[0]['episode_name'],
+            content_group_id=content_group_id or results[0].get('client_group_id')
         )
         
         if not related_content.get("content_found", False):
             return {
                 "data": related_content,
-                "message": f"No content found for telemetry episode: {episode_id}. Reason: {related_content.get('reason', 'Unknown')}"
+                "message": f"No content found for telemetry record {element_id}. Reason: {related_content.get('reason', 'Unknown')}"
             }
             
         return {
             "data": related_content,
-            "message": f"Found related content for telemetry episode: {episode_id}"
+            "message": f"Found related content for telemetry record {element_id}"
         }
     except Exception as e:
-        logger.error(f"Error finding content for telemetry episode: {e}")
+        logger.error(f"Error finding content for telemetry record: {e}")
         logger.error(traceback.format_exc())
-        return {"error": f"Failed to find content for telemetry episode: {str(e)}"}
+        return {"error": f"Failed to find content for telemetry record: {str(e)}"}
 
 
 @mcp.tool()
