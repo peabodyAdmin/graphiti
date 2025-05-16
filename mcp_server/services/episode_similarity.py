@@ -18,7 +18,7 @@ from graphiti_core.nodes import EpisodicNode
 logger = logging.getLogger(__name__)
 
 # Constants
-MIN_SIMILARITY_SCORE = 0.7  # Minimum similarity score to consider
+MIN_SIMILARITY_SCORE = 0.5  # Minimum similarity score to consider
 MAX_RESULTS_PER_GROUP = 3   # Maximum number of results per group
 MAX_GROUPS = 5              # Maximum number of group suggestions to return
 
@@ -27,12 +27,15 @@ class SimilarityResult(NamedTuple):
     suggested_group_id: str
     similar_groups: List[Dict[str, Any]]
     similar_episodes: List[Dict[str, Any]]
+    auto_assign: bool = False
+    confidence: float = 0.0
 
 async def find_similar_episodes(
     graphiti: Graphiti,
     name: str,
     content: str,
     embedder: Optional[EmbedderClient] = None,
+    confidence_threshold: float = 0.85,
 ) -> SimilarityResult:
     """Find similar episodes across all groups and suggest appropriate group_id.
     
@@ -108,8 +111,17 @@ async def find_similar_episodes(
         if not group_id:
             continue
             
+        # Process any DateTime objects for JSON serialization
+        serializable_episode_data = {}
+        for key, value in episode_data.items():
+            # Convert Neo4j DateTime objects to ISO format strings
+            if hasattr(value, "to_native"):
+                serializable_episode_data[key] = value.to_native().isoformat()
+            else:
+                serializable_episode_data[key] = value
+                
         # Add to similar episodes list
-        similar_episodes.append(episode_data)
+        similar_episodes.append(serializable_episode_data)
         
         # Track group scores
         if group_id not in group_scores:
@@ -121,11 +133,16 @@ async def find_similar_episodes(
         
         # Add to group episodes (limited per group)
         if len(group_episodes[group_id]) < MAX_RESULTS_PER_GROUP:
+            # Convert Neo4j DateTime to ISO format string to ensure JSON serialization works
+            created_at = episode_data.get("created_at", "")
+            if hasattr(created_at, "to_native"):
+                created_at = created_at.to_native().isoformat()
+                
             group_episodes[group_id].append({
                 "name": episode_data.get("name", ""),
                 "content": episode_data.get("content", "")[:200] + "...",  # Truncate for brevity
                 "similarity": similarity,
-                "created_at": episode_data.get("created_at", ""),
+                "created_at": created_at,
             })
     
     # Get group descriptions
@@ -152,10 +169,22 @@ async def find_similar_episodes(
         # Generate a new group_id based on the content
         suggested_group_id = generate_group_id_suggestion(name, content)
     
+    # Determine if we should auto-assign based on confidence
+    auto_assign = False
+    confidence = 0.0
+    
+    if similar_groups:
+        # Get the confidence score from the top group
+        confidence = similar_groups[0]["score"]
+        # Auto-assign if confidence exceeds threshold
+        auto_assign = confidence >= confidence_threshold
+    
     return SimilarityResult(
         suggested_group_id=suggested_group_id,
         similar_groups=similar_groups,
         similar_episodes=similar_episodes[:10],  # Limit to top 10 overall
+        auto_assign=auto_assign,
+        confidence=confidence
     )
 
 async def _get_group_descriptions(graphiti: Graphiti, group_ids: List[str]) -> Dict[str, str]:

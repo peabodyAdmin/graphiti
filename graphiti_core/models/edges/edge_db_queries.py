@@ -56,3 +56,19 @@ COMMUNITY_EDGE_SAVE = """
         MERGE (community)-[r:HAS_MEMBER {uuid: $uuid}]->(node)
         SET r = {uuid: $uuid, group_id: $group_id, created_at: $created_at}
         RETURN r.uuid AS uuid"""
+
+GROUP_REGISTRY_EDGE_SAVE = """
+        MATCH (episode:Episodic {uuid: $episode_uuid}) 
+        MATCH (registry:GroupRegistry {group_id: $group_id}) 
+        MERGE (episode)-[r:BELONGS_TO {uuid: $uuid}]->(registry)
+        SET r = {uuid: $uuid, group_id: $group_id, created_at: $created_at}
+        RETURN r.uuid AS uuid"""
+
+GROUP_REGISTRY_EDGE_SAVE_BULK = """
+    UNWIND $registry_edges AS edge
+    MATCH (episode:Episodic {uuid: edge.source_node_uuid}) 
+    MATCH (registry:GroupRegistry {group_id: edge.group_id}) 
+    MERGE (episode)-[r:BELONGS_TO {uuid: edge.uuid}]->(registry)
+    SET r = {uuid: edge.uuid, group_id: edge.group_id, created_at: edge.created_at}
+    RETURN r.uuid AS uuid
+"""

@@ -1,0 +1,18 @@
+{
+  "pending_id": "4a8c1a43-e565-4698-9911-3707cd3ffd77",
+  "name": "Star Wars: A New Hope Film Description",
+  "episode_body": "Star Wars: A New Hope (originally released simply as \"Star Wars\" in 1977) is the groundbreaking first installment of George Lucas's space saga that revolutionized filmmaking with its innovative special effects, memorable characters, and sweeping musical score by John Williams. Set against the backdrop of a galactic civil war, the film follows farm boy Luke Skywalker (Mark Hamill) who discovers his connection to the mystical Force when he intercepts a distress message from Princess Leia (Carrie Fisher) to Obi-Wan Kenobi (Alec Guinness), an aging Jedi Knight. With the help of smuggler Han Solo (Harrison Ford) and his Wookiee co-pilot Chewbacca, they embark on a daring mission to rescue the princess from the clutches of the evil Darth Vader and the oppressive Galactic Empire's planet-destroying Death Star. The film's blend of classic hero's journey storytelling with a lived-in, high-tech universe created a cultural phenomenon that would spawn multiple sequels, prequels, and spin-offs, establishing one of the most successful and influential franchises in cinema history and earning seven Academy Awards, including Best Visual Effects, Best Original Score, and Best Art Direction.",
+  "source": "text",
+  "source_description": "Film description",
+  "suggested_group_id": "star_wars_franchise",
+  "similar_groups": [
+    {
+      "group_id": "star_wars_franchise",
+      "score": 0.7830445863132466,
+      "description": "Group for Star Wars Franchise Overview",
+      "sample_episodes": [
+        {
+          "name": "Star Wars Franchise Overview",
+          "content": "Star Wars is an epic space opera franchise created by George Lucas in 1977 that has evolved into a global cultural phenomenon spanning movies, television series, books, comics, video games, theme park...",
+          "similarity": 0.7830445863132466,
+          "created_at": 

@@ -574,15 +574,25 @@ You will not:
   - EXPLAIN that the group_id determines the namespace for content organization
 - Always use the EXACT group_id provided by the user without modification
 
-## 👤 HUMAN-IN-THE-LOOP REQUIREMENT
+## 👤 STRICT HUMAN-IN-THE-LOOP REQUIREMENT
 
 - When suggesting a group_id based on content similarity:
-  - ALWAYS present options to a human user for review
-  - NEVER automatically accept the suggested group_id
-  - REQUIRE explicit human confirmation before continuing
-  - EXPLAIN the importance of proper group selection for knowledge organization
-- The continue_episode_ingestion function requires human_confirmed=True
-- This ensures proper oversight and prevents automatic categorization errors
+  - YOU MUST present options to a human user for review
+  - YOU MUST NEVER automatically select a group_id without human input
+  - YOU MUST NEVER simulate or assume human confirmation
+  - YOU MUST NEVER set human_confirmed=True unless a real human has made the selection
+  - YOU MUST provide human_confirmation_details explaining how the human made their selection
+
+- The continue_episode_ingestion function has strict requirements:
+  - It REQUIRES human_confirmed=True
+  - It REQUIRES human_confirmation_details explaining how confirmation was obtained
+  - Setting human_confirmed=True without actual human input is a VIOLATION of protocol
+
+- IMPORTANT: "Figuring out" the appropriate group_id yourself is NOT allowed
+  - Even if you think you know the right group_id
+  - Even if the user has expressed preferences in the past
+  - Even if the suggested group_id seems obvious
+  - YOU MUST ALWAYS get explicit human confirmation
 
 ## 🛠 Required Properties Format
 
@@ -829,8 +839,10 @@ async def add_episode(
 
     This function implements a two-step workflow to ensure proper group_id selection:
     1. If group_id is provided, it validates the group_id and adds the episode directly
-    2. If group_id is not provided, it suggests a group_id based on content similarity
+       only if the group already exists in the registry
+    2. If group_id is not provided or doesn't exist, it suggests a group_id based on content similarity
        and returns a pending_id for later confirmation
+    3. If no group_id is provided but a high-confidence match is found, it may auto-assign
 
     Args:
         name (str): Name of the episode
@@ -848,9 +860,11 @@ async def add_episode(
         labels (list[str], optional): List of labels for the episode
 
     Returns:
-        If group_id is provided and valid:
+        If group_id is provided, exists, and is valid:
             SuccessResponse: A success message indicating the episode was queued
-        If group_id is not provided:
+        If high-confidence match is found with no group_id provided:
+            SuccessResponse: A success message indicating the episode was auto-assigned
+        If group_id is not provided or doesn't exist:
             PendingResponse: Contains pending_id, suggested_group_id, and similar groups
         If an error occurs:
             ErrorResponse: An error message
@@ -878,7 +892,9 @@ async def add_episode(
         # Two-step workflow (second call using continue_episode_ingestion)
         continue_episode_ingestion(
             pending_id=result["pending_id"],
-            group_id=result["suggested_group_id"]
+            group_id=result["suggested_group_id"],
+            human_confirmed=True,
+            human_confirmation_details="User selected this group from the provided options"
         )
     """
     try:
@@ -905,86 +921,133 @@ async def add_episode(
         # Create a list of labels if provided
         episode_labels = labels if labels else []
 
-        # Direct path: If group_id is provided, validate and process directly
+        # Import registry and similarity search
+        from services.group_registry import GroupRegistry
+        from services.episode_similarity import find_similar_episodes
+        from services.pending_episodes import PendingEpisodesStorage
+        
+        # Initialize registry
+        registry = GroupRegistry(graphiti_client.driver)
+        await registry.initialize()
+        
+        # Prepare the episode data
+        episode_data = {
+            'name': name,
+            'episode_body': episode_body,
+            'source': source_type,  # PATCH: always use enum
+            'source_description': source_description,
+            'reference_time': now,
+            'uuid': episode_uuid,
+            'tags': episode_tags,
+            'labels': episode_labels,
+        }
+
+        # Direct path: If group_id is provided, validate and check if it exists
         if group_id:
-            # Check if group registry exists and validate group_id
-            from services.group_registry import GroupRegistry
-            registry = GroupRegistry(graphiti_client.driver)
-            
-            # Initialize registry if not already done
-            await registry.initialize()
-            
             # Check if group_id is valid format
             if not registry._is_valid_group_id(group_id):
                 return {'error': f'Invalid group_id format: {group_id}. Must be at least 3 characters, start with a letter, and contain only alphanumeric characters, underscores, and hyphens.'}
             
-            # Prepare the episode data
-            episode_data = {
-                'name': name,
-                'episode_body': episode_body,
-                'source': source_type,  # PATCH: always use enum
-                'source_description': source_description,
-                'reference_time': now,
-                'uuid': episode_uuid,
-                'tags': episode_tags,
-                'labels': episode_labels,
-            }
-
-            # Get or create a queue for this group_id
-            if group_id not in episode_queues:
-                episode_queues[group_id] = asyncio.Queue()
-                # Start a task to process episodes for this group_id
-                asyncio.create_task(process_episode_queue(group_id))
-
-            # Add the episode to the queue
-            await episode_queues[group_id].put(episode_data)
-
-            # Register the group if it doesn't exist yet
+            # Check if group exists in registry
             group_info = await registry.get_group(group_id)
-            if not group_info:
-                await registry.register_group(
-                    group_id=group_id,
-                    description=f"Auto-created group for {name}",
-                    creator="system"
-                )
-
-            return {'message': f'Episode added to queue for processing in group: {group_id}'}
-        else:
-            # Import similarity search
-            from services.episode_similarity import find_similar_episodes
             
-            # Find similar episodes and get group suggestions
+            if group_info:
+                # Group exists, proceed with direct processing
+                # Get or create a queue for this group_id
+                if group_id not in episode_queues:
+                    episode_queues[group_id] = asyncio.Queue()
+                    # Start a task to process episodes for this group_id
+                    asyncio.create_task(process_episode_queue(group_id))
+
+                # Add the episode to the queue
+                await episode_queues[group_id].put(episode_data)
+
+                return {'message': f'Episode added to queue for processing in group: {group_id}'}
+            else:
+                # Group doesn't exist, go to continuation flow
+                # Find similar episodes and get group suggestions
+                similarity_result = await find_similar_episodes(
+                    graphiti=graphiti_client,
+                    name=name,
+                    content=episode_body,
+                )
+                
+                # Store as pending episode
+                pending_storage = PendingEpisodesStorage()
+                
+                pending_id = pending_storage.store_pending_episode(
+                    name=name,
+                    episode_body=episode_body,
+                    source=source_type.value,  # PATCH: store as string for serialization
+                    source_description=source_description,
+                    suggested_group_id=group_id,  # Use the provided group_id as the suggestion
+                    similar_groups=similarity_result.similar_groups,
+                    uuid=episode_uuid,
+                    tags=episode_tags,
+                    labels=episode_labels,
+                )
+                
+                return {
+                    'pending': True,
+                    'pending_id': pending_id,
+                    'suggested_group_id': group_id,  # Suggest the provided group_id
+                    'similar_groups': similarity_result.similar_groups,
+                    'requires_human_confirmation': True,
+                    'message': 'HUMAN INPUT REQUIRED: The provided group_id does not exist. Please have a human review and select a group_id before continuing. Use continue_episode_ingestion with human_confirmed=True to complete processing.'
+                }
+        else:
+            # No group_id provided, find similar episodes and get group suggestions
             similarity_result = await find_similar_episodes(
                 graphiti=graphiti_client,
                 name=name,
                 content=episode_body,
+                confidence_threshold=0.85,  # Configurable threshold for auto-assignment
             )
             
-            # Store as pending episode
-            from services.pending_episodes import PendingEpisodesStorage
-            pending_storage = PendingEpisodesStorage()
-            
-            pending_id = pending_storage.store_pending_episode(
-                name=name,
-                episode_body=episode_body,
-                source=source_type.value,  # PATCH: store as string for serialization
-                source_description=source_description,
-                suggested_group_id=similarity_result.suggested_group_id,
-                similar_groups=similarity_result.similar_groups,
-                uuid=episode_uuid,
-                tags=episode_tags,
-                labels=episode_labels,
-            )
-            
-            # Return pending information for continuation with explicit human confirmation requirement
-            return {
-                'pending': True,
-                'pending_id': pending_id,
-                'suggested_group_id': similarity_result.suggested_group_id,
-                'similar_groups': similarity_result.similar_groups,
-                'requires_human_confirmation': True,
-                'message': 'HUMAN INPUT REQUIRED: Please have a human review and select a group_id before continuing. Use continue_episode_ingestion with human_confirmed=True to complete processing.'
-            }
+            # Check if we have a high-confidence match for auto-assignment
+            if similarity_result.auto_assign and similarity_result.similar_groups:
+                # High confidence match found, auto-assign
+                auto_group_id = similarity_result.suggested_group_id
+                
+                # Get or create a queue for this group_id
+                if auto_group_id not in episode_queues:
+                    episode_queues[auto_group_id] = asyncio.Queue()
+                    # Start a task to process episodes for this group_id
+                    asyncio.create_task(process_episode_queue(auto_group_id))
+
+                # Add the episode to the queue
+                await episode_queues[auto_group_id].put(episode_data)
+
+                return {
+                    'message': f'Episode automatically assigned to group: {auto_group_id} (confidence: {similarity_result.confidence:.2f})',
+                    'auto_assigned': True,
+                    'group_id': auto_group_id
+                }
+            else:
+                # No high-confidence match, store as pending episode
+                pending_storage = PendingEpisodesStorage()
+                
+                pending_id = pending_storage.store_pending_episode(
+                    name=name,
+                    episode_body=episode_body,
+                    source=source_type.value,  # PATCH: store as string for serialization
+                    source_description=source_description,
+                    suggested_group_id=similarity_result.suggested_group_id,
+                    similar_groups=similarity_result.similar_groups,
+                    uuid=episode_uuid,
+                    tags=episode_tags,
+                    labels=episode_labels,
+                )
+                
+                # Return pending information for continuation with explicit human confirmation requirement
+                return {
+                    'pending': True,
+                    'pending_id': pending_id,
+                    'suggested_group_id': similarity_result.suggested_group_id,
+                    'similar_groups': similarity_result.similar_groups,
+                    'requires_human_confirmation': True,
+                    'message': 'HUMAN INPUT REQUIRED: Please have a human review and select a group_id before continuing. Use continue_episode_ingestion with human_confirmed=True and human_confirmation_details to complete processing.'
+                }
     except Exception as e:
         error_msg = str(e)
         logger.error(f'Error in add_episode: {error_msg}', exc_info=True)
@@ -996,21 +1059,31 @@ async def continue_episode_ingestion(
     pending_id: str,
     group_id: str,
     human_confirmed: bool = False,
+    human_confirmation_details: str = None,
 ) -> SuccessResponse | ErrorResponse:
     """Continue the ingestion of a pending episode.
 
-    This function requires explicit human confirmation to ensure proper group_id selection.
-    The MCP client should present the suggested group_id and alternatives to a human user
+    This function REQUIRES explicit human confirmation to ensure proper group_id selection.
+    The MCP client MUST present the suggested group_id and alternatives to a human user
     before calling this function.
 
     Args:
         pending_id (str): The ID of the pending episode
         group_id (str): The selected group_id for the episode
-        human_confirmed (bool): Explicit confirmation that a human reviewed and approved this selection
+        human_confirmed (bool): REQUIRED confirmation that a human reviewed and approved this selection
+        human_confirmation_details (str, optional): Details about how human confirmation was obtained
     """
-    # Ensure human confirmation is provided
+    # Enhanced human confirmation check
     if not human_confirmed:
-        return {'error': 'Human confirmation required for group_id selection. Please have a human review and approve the group_id before continuing.'}
+        return {
+            'error': 'HUMAN CONFIRMATION REQUIRED: This function cannot proceed without explicit confirmation from a human user. The MCP client MUST present the group_id options to a human and obtain their selection before continuing.'
+        }
+    
+    # Validate human_confirmation_details if required
+    if human_confirmed and not human_confirmation_details:
+        return {
+            'error': 'HUMAN CONFIRMATION DETAILS REQUIRED: Please provide details about how human confirmation was obtained (e.g., "User selected this group from the provided options")'
+        }
     try:
         # Get the pending episode data
         from services.pending_episodes import PendingEpisodesStorage

@@ -32,6 +32,7 @@ from graphiti_core.models.edges.edge_db_queries import (
     COMMUNITY_EDGE_SAVE,
     ENTITY_EDGE_SAVE,
     EPISODIC_EDGE_SAVE,
+    GROUP_REGISTRY_EDGE_SAVE,
 )
 from graphiti_core.nodes import Node
 
@@ -66,7 +67,7 @@ class Edge(BaseModel, ABC):
     async def delete(self, driver: AsyncDriver):
         result = await driver.execute_query(
             """
-        MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER {uuid: $uuid}]->(m)
+        MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER|BELONGS_TO {uuid: $uuid}]->(m)
         DELETE e
         """,
             uuid=self.uuid,
@@ -350,11 +351,29 @@ class CommunityEdge(Edge):
 
         return result
 
+
+class GroupRegistryEdge(Edge):
+    """Edge connecting Episodic nodes to their corresponding GroupRegistry nodes."""
+    
+    async def save(self, driver: AsyncDriver):
+        result = await driver.execute_query(
+            GROUP_REGISTRY_EDGE_SAVE,
+            episode_uuid=self.source_node_uuid,
+            group_id=self.group_id,
+            uuid=self.uuid,
+            created_at=self.created_at,
+            database_=DEFAULT_DATABASE,
+        )
+
+        logger.debug(f'Saved edge to neo4j: {self.uuid}')
+
+        return result
+
     @classmethod
     async def get_by_uuid(cls, driver: AsyncDriver, uuid: str):
         records, _, _ = await driver.execute_query(
             """
-        MATCH (n:Community)-[e:HAS_MEMBER {uuid: $uuid}]->(m:Entity | Community)
+        MATCH (n:Episodic)-[e:BELONGS_TO {uuid: $uuid}]->(m:GroupRegistry)
         RETURN
             e.uuid As uuid,
             e.group_id AS group_id,
@@ -367,15 +386,17 @@ class CommunityEdge(Edge):
             routing_='r',
         )
 
-        edges = [get_community_edge_from_record(record) for record in records]
+        edges = [get_group_registry_edge_from_record(record) for record in records]
 
+        if len(edges) == 0:
+            raise EdgeNotFoundError(uuid)
         return edges[0]
 
     @classmethod
     async def get_by_uuids(cls, driver: AsyncDriver, uuids: list[str]):
         records, _, _ = await driver.execute_query(
             """
-        MATCH (n:Community)-[e:HAS_MEMBER]->(m:Entity | Community)
+        MATCH (n:Episodic)-[e:BELONGS_TO]->(m:GroupRegistry)
         WHERE e.uuid IN $uuids
         RETURN
             e.uuid As uuid,
@@ -389,8 +410,10 @@ class CommunityEdge(Edge):
             routing_='r',
         )
 
-        edges = [get_community_edge_from_record(record) for record in records]
+        edges = [get_group_registry_edge_from_record(record) for record in records]
 
+        if len(edges) == 0 and uuids:
+            raise EdgeNotFoundError(uuids[0])
         return edges
 
     @classmethod
@@ -406,7 +429,7 @@ class CommunityEdge(Edge):
 
         records, _, _ = await driver.execute_query(
             """
-        MATCH (n:Community)-[e:HAS_MEMBER]->(m:Entity | Community)
+        MATCH (n:Episodic)-[e:BELONGS_TO]->(m:GroupRegistry)
         WHERE e.group_id IN $group_ids
         """
             + cursor_query
@@ -427,8 +450,10 @@ class CommunityEdge(Edge):
             routing_='r',
         )
 
-        edges = [get_community_edge_from_record(record) for record in records]
+        edges = [get_group_registry_edge_from_record(record) for record in records]
 
+        if len(edges) == 0:
+            raise GroupsEdgesNotFoundError(group_ids)
         return edges
 
 
@@ -462,6 +487,16 @@ def get_entity_edge_from_record(record: Any) -> EntityEdge:
 
 def get_community_edge_from_record(record: Any):
     return CommunityEdge(
+        uuid=record['uuid'],
+        group_id=record['group_id'],
+        source_node_uuid=record['source_node_uuid'],
+        target_node_uuid=record['target_node_uuid'],
+        created_at=record['created_at'].to_native(),
+    )
+
+
+def get_group_registry_edge_from_record(record: Any) -> GroupRegistryEdge:
+    return GroupRegistryEdge(
         uuid=record['uuid'],
         group_id=record['group_id'],
         source_node_uuid=record['source_node_uuid'],

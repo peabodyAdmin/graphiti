@@ -82,6 +82,9 @@ from graphiti_core.utils.maintenance.graph_data_operations import (
     build_indices_and_constraints,
     retrieve_episodes,
 )
+from graphiti_core.utils.maintenance.group_registry_operations import (
+    create_group_registry_edge_for_episode,
+)
 from graphiti_core.utils.maintenance.node_operations import (
     extract_attributes_from_nodes,
     extract_nodes,
@@ -550,6 +553,25 @@ class Graphiti:
                         "entity_edge_count": len(entity_edges)
                     }
                 )
+                
+            # Create edge to group registry if applicable
+            if group_id:
+                if telemetry_client:
+                    await telemetry_client.record_processing_step(
+                        episode_name=name,
+                        step_name="group_registry_edge_creation", 
+                        status="started"
+                    )
+                
+                group_registry_edge = await create_group_registry_edge_for_episode(self.driver, episode)
+                
+                if telemetry_client:
+                    await telemetry_client.record_processing_step(
+                        episode_name=name,
+                        step_name="group_registry_edge_creation", 
+                        status="success",
+                        data={"edge_created": group_registry_edge is not None}
+                    )
 
             # Update any communities
             if update_communities:
@@ -752,6 +774,30 @@ class Graphiti:
 
             # save edges to KG
             await semaphore_gather(*[edge.save(self.driver) for edge in edges])
+            
+            # Create edges to group registry if applicable
+            if group_id:
+                if telemetry_client:
+                    for episode in episodes:
+                        await telemetry_client.record_processing_step(
+                            episode_name=episode.name,
+                            step_name="group_registry_edge_creation", 
+                            status="started"
+                        )
+                
+                # Create group registry edges for all episodes
+                group_registry_edges = await semaphore_gather(
+                    *[create_group_registry_edge_for_episode(self.driver, episode) for episode in episodes]
+                )
+                
+                if telemetry_client:
+                    for i, episode in enumerate(episodes):
+                        await telemetry_client.record_processing_step(
+                            episode_name=episode.name,
+                            step_name="group_registry_edge_creation", 
+                            status="success",
+                            data={"edge_created": group_registry_edges[i] is not None}
+                        )
 
             end = time()
             processing_time_ms = (end - start) * 1000
@@ -967,6 +1013,16 @@ class Graphiti:
             for record in records:
                 if record['episode_count'] == 1:
                     nodes_to_delete.append(node)
+        
+        # Delete any BELONGS_TO edges from the episode to GroupRegistry nodes
+        await self.driver.execute_query(
+            """
+            MATCH (e:Episodic {uuid: $episode_uuid})-[r:BELONGS_TO]->(:GroupRegistry)
+            DELETE r
+            """,
+            episode_uuid=episode.uuid,
+            database_=DEFAULT_DATABASE
+        )
 
         await semaphore_gather(*[node.delete(self.driver) for node in nodes_to_delete])
         await semaphore_gather(*[edge.delete(self.driver) for edge in edges_to_delete])

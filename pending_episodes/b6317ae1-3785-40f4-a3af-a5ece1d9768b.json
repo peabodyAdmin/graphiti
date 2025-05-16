@@ -1,0 +1,18 @@
+{
+  "pending_id": "b6317ae1-3785-40f4-a3af-a5ece1d9768b",
+  "name": "Star Wars: A New Hope",
+  "episode_body": "Star Wars: A New Hope is the first film in the Star Wars saga, released in 1977. Directed by George Lucas, it follows Luke Skywalker who joins forces with Jedi Knight Obi-Wan Kenobi, smuggler Han Solo, Chewbacca, and droids C-3PO and R2-D2 to rescue Princess Leia from the evil Darth Vader, and help the Rebel Alliance destroy the Empire's planet-destroying space station, the Death Star. The film stars Mark Hamill, Harrison Ford, Carrie Fisher, and Alec Guinness. It revolutionized special effects in cinema and established the Star Wars franchise as a cultural phenomenon.",
+  "source": "text",
+  "source_description": "",
+  "suggested_group_id": "star_wars_franchise",
+  "similar_groups": [
+    {
+      "group_id": "star_wars_franchise",
+      "score": 0.704570259984008,
+      "description": "Group for Star Wars Franchise Overview",
+      "sample_episodes": [
+        {
+          "name": "Star Wars Franchise Overview",
+          "content": "Star Wars is an epic space opera franchise created by George Lucas in 1977 that has evolved into a global cultural phenomenon spanning movies, television series, books, comics, video games, theme park...",
+          "similarity": 0.704570259984008,
+          "created_at": 
