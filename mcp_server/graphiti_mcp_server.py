@@ -574,6 +574,16 @@ You will not:
   - EXPLAIN that the group_id determines the namespace for content organization
 - Always use the EXACT group_id provided by the user without modification
 
+## 👤 HUMAN-IN-THE-LOOP REQUIREMENT
+
+- When suggesting a group_id based on content similarity:
+  - ALWAYS present options to a human user for review
+  - NEVER automatically accept the suggested group_id
+  - REQUIRE explicit human confirmation before continuing
+  - EXPLAIN the importance of proper group selection for knowledge organization
+- The continue_episode_ingestion function requires human_confirmed=True
+- This ensures proper oversight and prevents automatic categorization errors
+
 ## 🛠 Required Properties Format
 
 The episode will be ingested with the following properties:
@@ -966,13 +976,14 @@ async def add_episode(
                 labels=episode_labels,
             )
             
-            # Return pending information for continuation
+            # Return pending information for continuation with explicit human confirmation requirement
             return {
                 'pending': True,
                 'pending_id': pending_id,
                 'suggested_group_id': similarity_result.suggested_group_id,
                 'similar_groups': similarity_result.similar_groups,
-                'message': 'Episode is pending group_id confirmation. Use continue_episode_ingestion to complete processing.'
+                'requires_human_confirmation': True,
+                'message': 'HUMAN INPUT REQUIRED: Please have a human review and select a group_id before continuing. Use continue_episode_ingestion with human_confirmed=True to complete processing.'
             }
     except Exception as e:
         error_msg = str(e)
@@ -984,13 +995,22 @@ async def add_episode(
 async def continue_episode_ingestion(
     pending_id: str,
     group_id: str,
+    human_confirmed: bool = False,
 ) -> SuccessResponse | ErrorResponse:
     """Continue the ingestion of a pending episode.
+
+    This function requires explicit human confirmation to ensure proper group_id selection.
+    The MCP client should present the suggested group_id and alternatives to a human user
+    before calling this function.
 
     Args:
         pending_id (str): The ID of the pending episode
         group_id (str): The selected group_id for the episode
+        human_confirmed (bool): Explicit confirmation that a human reviewed and approved this selection
     """
+    # Ensure human confirmation is provided
+    if not human_confirmed:
+        return {'error': 'Human confirmation required for group_id selection. Please have a human review and approve the group_id before continuing.'}
     try:
         # Get the pending episode data
         from services.pending_episodes import PendingEpisodesStorage

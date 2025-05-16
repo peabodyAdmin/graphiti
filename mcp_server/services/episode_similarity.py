@@ -160,22 +160,26 @@ async def find_similar_episodes(
 
 async def _get_group_descriptions(graphiti: Graphiti, group_ids: List[str]) -> Dict[str, str]:
     """Get descriptions for a list of group IDs."""
-    # Check if the GroupRegistry label exists
+    # Check if the GroupRegistry and GroupRegistryRoot labels exist
     check_query = """
     CALL db.labels() YIELD label
-    RETURN 'GroupRegistry' IN collect(label) AS exists
+    WITH collect(label) as labels
+    RETURN 
+        'GroupRegistry' IN labels AS registry_exists,
+        'GroupRegistryRoot' IN labels AS root_exists
     """
     
     check_result = await graphiti.driver.execute_query(check_query)
-    registry_exists = check_result[0][0]["exists"] if check_result[0] else False
+    registry_exists = check_result[0][0]["registry_exists"] if check_result[0] else False
+    root_exists = check_result[0][0]["root_exists"] if check_result[0] else False
     
-    if not registry_exists:
+    if not registry_exists or not root_exists:
         # No registry, return empty descriptions
         return {group_id: "" for group_id in group_ids}
     
-    # Query the registry for descriptions
+    # Query the registry for descriptions using the new structure
     query = """
-    MATCH (g:GroupRegistry)
+    MATCH (root:GroupRegistryRoot {name: 'Group Registry'})-[:CONTAINS]->(g:GroupRegistry)
     WHERE g.group_id IN $group_ids
     RETURN g.group_id AS group_id, g.description AS description
     """

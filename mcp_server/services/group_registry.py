@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 # Constants
 PROTECTED_GROUPS = ['system', 'graphiti_logs', 'admin', 'graphiti_system']
 GROUP_REGISTRY_LABEL = 'GroupRegistry'
+GROUP_REGISTRY_ROOT_LABEL = 'GroupRegistryRoot'
+GROUP_REGISTRY_ROOT_NAME = 'Group Registry'
 
 class GroupRegistry:
     """Manage the group registry in Neo4j."""
@@ -25,12 +27,19 @@ class GroupRegistry:
         self.driver = driver
         
     async def initialize(self):
-        """Ensure registry indices and constraints exist."""
+        """Ensure registry indices, constraints, and root node exist."""
         # Create constraints for uniqueness
         await self.driver.execute_query(
             f"CREATE CONSTRAINT IF NOT EXISTS FOR (g:{GROUP_REGISTRY_LABEL}) REQUIRE g.group_id IS UNIQUE"
         )
-        logger.info("Group registry initialized")
+        
+        # Create root node
+        await self.driver.execute_query(
+            f"MERGE (root:{GROUP_REGISTRY_ROOT_LABEL} {{name: $name}})",
+            {"name": GROUP_REGISTRY_ROOT_NAME}
+        )
+        
+        logger.info("Group registry initialized with root node")
         
     async def register_group(self, group_id: str, description: str, 
                              creator: str = "system", metadata: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -46,6 +55,9 @@ class GroupRegistry:
         Returns:
             Dictionary with group information
         """
+        # Ensure registry is initialized
+        await self.initialize()
+        
         # Validate group_id
         if not self._is_valid_group_id(group_id):
             raise ValueError(f"Invalid group_id format: {group_id}")
@@ -53,22 +65,26 @@ class GroupRegistry:
         if self.is_protected_group(group_id):
             raise ValueError(f"Cannot modify protected group: {group_id}")
             
-        # Create or update group in registry
+        # Create or update group in registry and connect to root
         query = f"""
+        MATCH (root:{GROUP_REGISTRY_ROOT_LABEL} {{name: $root_name}})
         MERGE (g:{GROUP_REGISTRY_LABEL} {{group_id: $group_id}})
         ON CREATE SET 
             g.created_at = datetime(),
             g.creator = $creator,
-            g.description = $description
+            g.description = $description,
+            g.name = $group_id
         ON MATCH SET 
             g.updated_at = datetime(),
             g.description = $description
+        MERGE (root)-[:CONTAINS]->(g)
         """
         
         # Add metadata if provided
         if metadata:
             metadata_parts = []
             params = {
+                "root_name": GROUP_REGISTRY_ROOT_NAME,
                 "group_id": group_id,
                 "description": description,
                 "creator": creator,
@@ -87,6 +103,7 @@ class GroupRegistry:
             await self.driver.execute_query(
                 query,
                 {
+                    "root_name": GROUP_REGISTRY_ROOT_NAME,
                     "group_id": group_id,
                     "description": description,
                     "creator": creator,
@@ -100,12 +117,15 @@ class GroupRegistry:
         
     async def get_group(self, group_id: str) -> Optional[Dict[str, Any]]:
         """Get information about a specific group."""
+        # Ensure registry is initialized
+        await self.initialize()
+        
         result = await self.driver.execute_query(
             f"""
-            MATCH (g:{GROUP_REGISTRY_LABEL} {{group_id: $group_id}})
+            MATCH (root:{GROUP_REGISTRY_ROOT_LABEL} {{name: $root_name}})-[:CONTAINS]->(g:{GROUP_REGISTRY_LABEL} {{group_id: $group_id}})
             RETURN g
             """,
-            {"group_id": group_id}
+            {"root_name": GROUP_REGISTRY_ROOT_NAME, "group_id": group_id}
         )
         
         if not result[0]:
@@ -122,7 +142,12 @@ class GroupRegistry:
         
     async def list_groups(self, include_protected: bool = False) -> List[Dict[str, Any]]:
         """List all registered groups."""
-        query = f"MATCH (g:{GROUP_REGISTRY_LABEL})"
+        # Ensure registry is initialized
+        await self.initialize()
+        
+        query = f"""
+        MATCH (root:{GROUP_REGISTRY_ROOT_LABEL} {{name: $root_name}})-[:CONTAINS]->(g:{GROUP_REGISTRY_LABEL})
+        """
         
         if not include_protected:
             query += " WHERE NOT g.group_id IN $protected_groups"
@@ -131,7 +156,7 @@ class GroupRegistry:
         
         result = await self.driver.execute_query(
             query,
-            {"protected_groups": PROTECTED_GROUPS}
+            {"root_name": GROUP_REGISTRY_ROOT_NAME, "protected_groups": PROTECTED_GROUPS}
         )
         
         groups = []
@@ -148,16 +173,19 @@ class GroupRegistry:
         
     async def delete_group(self, group_id: str) -> bool:
         """Delete a group from the registry (not the content)."""
+        # Ensure registry is initialized
+        await self.initialize()
+        
         if self.is_protected_group(group_id):
             raise ValueError(f"Cannot delete protected group: {group_id}")
             
         result = await self.driver.execute_query(
             f"""
-            MATCH (g:{GROUP_REGISTRY_LABEL} {{group_id: $group_id}})
-            DELETE g
+            MATCH (root:{GROUP_REGISTRY_ROOT_LABEL} {{name: $root_name}})-[r:CONTAINS]->(g:{GROUP_REGISTRY_LABEL} {{group_id: $group_id}})
+            DELETE r, g
             RETURN count(g) as deleted
             """,
-            {"group_id": group_id}
+            {"root_name": GROUP_REGISTRY_ROOT_NAME, "group_id": group_id}
         )
         
         deleted = result[0][0]["deleted"]
@@ -165,6 +193,9 @@ class GroupRegistry:
         
     async def _get_group_usage_stats(self, group_id: str) -> Dict[str, int]:
         """Get usage statistics for a group."""
+        # Ensure registry is initialized
+        await self.initialize()
+        
         # Count episodic nodes
         episodes_result = await self.driver.execute_query(
             """
@@ -221,6 +252,7 @@ class GroupRegistry:
     
     def is_protected_group(self, group_id: str) -> bool:
         """Check if a group is protected."""
+        # Note: This is a synchronous method, so we can't call initialize() here
         return group_id in PROTECTED_GROUPS
     
     def _is_valid_group_id(self, group_id: str) -> bool:
