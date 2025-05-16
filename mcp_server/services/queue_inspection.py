@@ -126,15 +126,11 @@ async def get_job_by_index(group_id: str, index: int) -> Dict[str, Any]:
             if "api_key" in job_data:
                 job_data["api_key"] = "[REDACTED]"
                 
-            # Get additional information from telemetry if available
+            # Telemetry detailed info has been removed
             if telemetry_client and "name" in job_data:
-                try:
-                    telemetry_data = await telemetry_client.get_episode_info(job_data["name"])
-                    if telemetry_data:
-                        job_data["telemetry"] = telemetry_data
-                except Exception as e:
-                    logger.error(f"Error getting telemetry data: {e}")
-                    job_data["telemetry_error"] = str(e)
+                job_data["telemetry"] = {
+                    "note": "Detailed telemetry info has been removed"
+                }
                     
             return {"job": job_data}
         except IndexError:

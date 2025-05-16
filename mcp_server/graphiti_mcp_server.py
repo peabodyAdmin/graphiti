@@ -1438,6 +1438,62 @@ async def initialize_server() -> tuple[FastMCP, MCPConfig]:
     return mcp, mcp_config
 
 
+async def get_telemetry_log_root_fuzzy_search(search_term: str, limit: int = 10) -> dict[str, Any]:
+    """
+    Perform a case-insensitive fuzzy search on EpisodeProcessingLog nodes in the graphiti_logs group_id.
+    
+    Args:
+        search_term: The search term to match against original_name (case-insensitive)
+        limit: Maximum number of results to return (default: 10)
+        
+    Returns:
+        Dictionary containing matching telemetry nodes
+    """
+    if telemetry_client is None:
+        return {"error": "Telemetry client not initialized"}
+    
+    try:
+        # Case-insensitive search on original_name
+        query = """
+        MATCH (l:EpisodeProcessingLog {group_id: 'graphiti_logs'})
+        WHERE toLower(l.original_name) CONTAINS toLower($search_term)
+        RETURN l
+        LIMIT $limit
+        """
+        
+        params = {"search_term": search_term, "limit": limit}
+        result = await telemetry_client.run_query(query, params)
+        
+        if not result:
+            return {"message": "No matching telemetry logs found", "nodes": []}
+        
+        # Format the node results
+        formatted_nodes = []
+        for record in result:
+            if 'l' in record and record['l']:
+                node = record['l']
+                formatted_node = {
+                    "elementId": node.get('elementId', ''),
+                    "id": node.get('id', ''),
+                    "attempt_count": node.get('attempt_count', 0),
+                    "client_group_id": node.get('client_group_id', ''),
+                    "end_time": node.get('end_time', ''),
+                    "episode_name": node.get('episode_name', ''),
+                    "group_id": node.get('group_id', ''),
+                    "original_name": node.get('original_name', ''),
+                    "processing_time_ms": node.get('processing_time_ms', 0),
+                    "start_time": node.get('start_time', ''),
+                    "status": node.get('status', '')
+                }
+                formatted_nodes.append(formatted_node)
+        
+        return {"message": "Telemetry logs retrieved successfully", "nodes": formatted_nodes}
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error searching telemetry logs: {error_msg}")
+        return {"error": f"Error searching telemetry logs: {error_msg}"}
+
+
 async def run_mcp_server():
     """Run the MCP server in the current event loop."""
     global mcp, telemetry_client, mcp_config
@@ -1462,18 +1518,8 @@ async def run_mcp_server():
     mcp.tool()(clear_graph)
     mcp.tool()(get_status)
     
-    # Always register telemetry diagnostic tools (they'll return appropriate errors if telemetry is disabled)
-    logger.info('Registering telemetry diagnostic tools')
-    mcp.tool()(telemetry_episode_trace)
-    mcp.tool()(telemetry_error_patterns)
-    mcp.tool()(telemetry_episodes_with_error)
-    mcp.tool()(telemetry_stats)
-    mcp.tool()(telemetry_recent_errors)
-    mcp.tool()(telemetry_lookup_by_content_uuid)
-    mcp.tool()(telemetry_search)
-    mcp.tool()(telemetry_find_content)
-    mcp.tool()(telemetry_fuzzy_search)
-    mcp.tool()(telemetry_format_results)
+    # Telemetry diagnostic tools have been removed
+    logger.info('Telemetry diagnostic tools have been removed')
     
     # Register queue inspection tools
     logger.info('Registering queue inspection tools')
@@ -1483,6 +1529,10 @@ async def run_mcp_server():
     # Register group registry tools
     logger.info('Registering group registry tools')
     mcp.tool()(list_group_registry)
+    
+    # Register telemetry tools
+    logger.info('Registering telemetry tools')
+    mcp.tool()(get_telemetry_log_root_fuzzy_search)
 
     # Get transport config from mcp_config, don't rely on settings object
     transport = mcp_config.transport
@@ -1503,532 +1553,7 @@ async def run_mcp_server():
         logger.error(traceback.format_exc())
 
 
-@mcp.tool()
-async def telemetry_episode_trace(elementId: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
-    """Get the full processing trace for a telemetry node by its Neo4j element ID.
-    
-    Args:
-        elementId: The Neo4j element ID of the telemetry node. Can be:
-                  - Just the numeric ID (e.g., "494")
-                  - A compound ID (e.g., "4:1105c001-9aca-44df-b787-08a8d10a5d70:494")
-        content_group_id: Optional content group_id to search for related content. 
-                         If not provided, will use the client_group_id from telemetry.
-    """
-    if not telemetry_client:
-        return {"error": "Telemetry system is not enabled"}
-        
-    try:
-        # Extract numeric ID from compound ID if needed
-        numeric_id = elementId
-        if ':' in elementId:
-            numeric_id = elementId.split(':')[-1]
-            
-        # Direct lookup by element ID
-        query = """
-        MATCH (e) WHERE id(e) = $elementId AND e.group_id = 'graphiti_logs'
-        RETURN e as episode
-        """
-        
-        results = await telemetry_client.run_query(query, {"elementId": int(numeric_id)})
-        
-        if not results or not results[0].get('episode'):
-            return {"error": f"No telemetry data found for element ID: {elementId}"}
-            
-        # Get the episode data
-        episode = results[0]['episode']
-        
-        # Format the episode data
-        episode_info = {'episode': {}}
-        for key, value in episode.items():
-            if isinstance(value, datetime):
-                episode_info['episode'][key] = value.isoformat()
-            else:
-                episode_info['episode'][key] = value
-        
-        # Find related content if processing was successful
-        if episode_info['episode'].get('status') == 'completed':
-            related_content = await telemetry_client.find_related_content(
-                episode_info['episode'].get('episode_name', ''),
-                content_group_id=content_group_id or episode_info['episode'].get('client_group_id')
-            )
-            episode_info['related_content'] = related_content
-        
-        return {
-            "data": episode_info,
-            "message": f"Retrieved telemetry trace for element ID: {elementId}"
-        }
-    except Exception as e:
-        logger.error(f"Error retrieving episode trace: {e}")
-        logger.error(traceback.format_exc())
-        return {"error": f"Failed to retrieve episode trace: {str(e)}"}
-
-
-@mcp.tool()
-async def telemetry_error_patterns() -> TelemetryResponse | ErrorResponse:
-    """Get patterns of errors across episodes.
-    
-    IMPORTANT USAGE NOTES:
-    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
-       regardless of the content's destination group.
-    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
-    3. Use telemetry_fuzzy_search() first to identify relevant episodes when you don't know the exact name.
-    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
-       exists for successful ones - making telemetry critical for debugging.
-    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
-
-    Example usage:
-        telemetry_fuzzy_search("ADR-013")  # First find matching episodes
-        telemetry_episode_trace("ADR-013: Integration of Mem0g...")  # Then get details using full name
-    
-    This tool analyzes all telemetry data to identify common error patterns
-    across multiple episodes, helping to identify systematic issues.
-    """
-    if not telemetry_client:
-        return {"error": "Telemetry system is not enabled"}
-        
-    try:
-        from telemetry.diagnostic_queries import ERROR_PATTERNS_QUERY
-        
-        result = await telemetry_client.run_query(ERROR_PATTERNS_QUERY)
-        return {"data": result, "message": "Successfully retrieved error patterns"}
-    except Exception as e:
-        return {"error": f"Failed to retrieve error patterns: {str(e)}"}
-
-
-@mcp.tool()
-async def telemetry_episodes_with_error(error_type: str) -> TelemetryResponse | ErrorResponse:
-    """Get all episodes affected by a specific error type.
-    
-    IMPORTANT USAGE NOTES:
-    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
-       regardless of the content's destination group.
-    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
-    3. Use telemetry_fuzzy_search() first to identify relevant episodes when you don't know the exact name.
-    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
-       exists for successful ones - making telemetry critical for debugging.
-    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
-
-    Example usage:
-        telemetry_fuzzy_search("ADR-013")  # First find matching episodes
-        telemetry_episode_trace("ADR-013: Integration of Mem0g...")  # Then get details using full name
-    
-    This tool allows you to find all episodes that experienced a particular type of error,
-    helping to understand the impact and scope of specific issues.
-    
-    Args:
-        error_type: The type of error to search for (e.g., "DatabaseConnectionError")
-    """
-    if not telemetry_client:
-        return {"error": "Telemetry system is not enabled"}
-        
-    try:
-        from telemetry.diagnostic_queries import EPISODES_WITH_ERROR_TYPE_QUERY
-        
-        result = await telemetry_client.run_query(EPISODES_WITH_ERROR_TYPE_QUERY, {"error_type": error_type})
-        return {"data": result, "message": f"Successfully retrieved episodes with error type: {error_type}"}
-    except Exception as e:
-        return {"error": f"Failed to retrieve episodes with error: {str(e)}"}
-
-
-@mcp.tool()
-async def telemetry_stats() -> TelemetryResponse | ErrorResponse:
-    """Get overall episode processing statistics.
-    
-    IMPORTANT USAGE NOTES:
-    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
-       regardless of the content's destination group.
-    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
-    3. Use telemetry_fuzzy_search() first to identify relevant episodes when you don't know the exact name.
-    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
-       exists for successful ones - making telemetry critical for debugging.
-    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
-
-    Example usage:
-        telemetry_fuzzy_search("ADR-013")  # First find matching episodes
-        telemetry_episode_trace("ADR-013: Integration of Mem0g...")  # Then get details using full name
-    
-    This tool provides summary statistics about all episode processing activities,
-    including success rates, failure counts, and average processing times.
-    """
-    if not telemetry_client:
-        return {"error": "Telemetry system is not enabled"}
-        
-    try:
-        # Use the improved telemetry client method instead of raw query
-        stats = await telemetry_client.get_telemetry_stats()
-        if not stats:
-            stats = {
-                "total_episodes": 0,
-                "completed": 0,
-                "failed": 0,
-                "in_progress": 0,
-                "avg_processing_time_ms": 0,
-                "total_errors": 0,
-                "success_rate": 0,
-                "no_data": True
-            }
-        return {"data": stats, "message": "Successfully retrieved processing statistics"}
-    except Exception as e:
-        logger.error(f"Failed to retrieve telemetry stats: {str(e)}")
-        logger.error(traceback.format_exc())
-        return {"error": f"Failed to retrieve processing statistics: {str(e)}"}
-
-
-@mcp.tool()
-async def telemetry_recent_errors() -> TelemetryResponse | ErrorResponse:
-    """Get the most recent errors from episode processing.
-    
-    IMPORTANT USAGE NOTES:
-    1. Always query telemetry data in 'graphiti_logs' group - this is where ALL telemetry is stored 
-       regardless of the content's destination group.
-    2. Prefer partial or fuzzy search terms (e.g., 'ADR-013') over exact episode names.
-    3. Use telemetry_fuzzy_search() first to identify relevant episodes when you don't know the exact name.
-    4. Remember that telemetry data exists for BOTH successful and failed ingestions, while content only 
-       exists for successful ones - making telemetry critical for debugging.
-    5. When multiple similar episodes exist, compare timestamps to select the relevant one.
-
-    Example usage:
-        telemetry_fuzzy_search("ADR-013")  # First find matching episodes
-        telemetry_episode_trace("ADR-013: Integration of Mem0g...")  # Then get details using full name
-    
-    This tool returns the 20 most recent errors that occurred during episode processing,
-    providing a quick view of recent issues.
-    """
-    if not telemetry_client:
-        return {"error": "Telemetry system is not enabled"}
-        
-    try:
-        from telemetry.diagnostic_queries import RECENT_ERRORS_QUERY
-        
-        result = await telemetry_client.run_query(RECENT_ERRORS_QUERY)
-        return {"data": result, "message": "Successfully retrieved recent errors"}
-    except Exception as e:
-        return {"error": f"Failed to retrieve recent errors: {str(e)}"}
-
-
-@mcp.tool()
-async def telemetry_lookup_by_content_uuid(content_uuid: str) -> TelemetryResponse | ErrorResponse:
-    """Find telemetry records related to a specific content node by its UUID.
-    
-    This tool provides a direct bridge between content in the knowledge graph and
-    the telemetry system that tracks how that content was processed. It's especially
-    useful for finding the processing history of specific content items.
-    
-    Args:
-        content_uuid: The UUID of the content node to find telemetry for
-    """
-    if not telemetry_client:
-        return {"error": "Telemetry system is not enabled"}
-    
-    try:
-        logger.info(f"Looking up telemetry for content UUID: {content_uuid}")
-        # Use the enhanced lookup method to find telemetry records
-        results = await telemetry_client.lookup_telemetry_for_content_uuid(content_uuid)
-        
-        if "error" in results:
-            return {"error": results["error"]}
-            
-        return {
-            "data": results, 
-            "message": f"Found {results.get('matches_found', 0)} telemetry records for content {results.get('content_info', {}).get('name')}"
-        }
-    except Exception as e:
-        logger.error(f"Error looking up telemetry for content UUID: {str(e)}")
-        logger.error(traceback.format_exc())
-        return {"error": f"Failed to lookup telemetry: {str(e)}"}
-
-
-@mcp.tool()
-async def telemetry_search(search_term: str, limit: int = 5, client_group_id: str = None) -> TelemetryResponse | ErrorResponse:
-    """Search for telemetry records by name or ID fragments.
-    
-    This tool allows finding telemetry records using partial names, IDs, or fuzzy matches,
-    making it easier to locate processing information for specific episodes.
-    
-    Args:
-        search_term: Text to search for - can be a partial name, ID, or fragment
-        limit: Maximum number of results to return (default: 5)
-        client_group_id: Optional client group_id to filter results to a specific content group
-    """
-    if not telemetry_client:
-        return {"error": "Telemetry system is not enabled"}
-    
-    try:
-        # Search for matching telemetry records
-        matches = await telemetry_client.find_episode_by_name_or_id(
-            search_term, 
-            limit=limit,
-            client_group_id=client_group_id
-        )
-        
-        if not matches:
-            return {
-                "data": [],
-                "message": f"No telemetry records found matching '{search_term}'"
-            }
-            
-        # Create a summary of each match for easier browsing
-        match_summaries = []
-        for match in matches:
-            episode = match.get("episode", {})
-            summary = {
-                "episode_id": episode.get("episode_id", "Unknown"),
-                "original_name": episode.get("original_name", "Unknown"),
-                "status": episode.get("status", "Unknown"),
-                "start_time": episode.get("start_time", ""),
-                "processing_time_ms": episode.get("processing_time_ms", 0),
-                "match_relevance": episode.get("match_relevance", "Unknown"),
-                "client_group_id": episode.get("client_group_id", "Unknown"),
-                "attempt_count": episode.get("attempt_count", 1),
-                "error_count": match.get("outcome_summary", {}).get("error_count", 0)
-            }
-            match_summaries.append(summary)
-        
-        return {
-            "data": match_summaries,
-            "message": f"Found {len(matches)} telemetry records matching '{search_term}'"
-        }
-    except Exception as e:
-        logger.error(f"Error searching telemetry records: {e}")
-        logger.error(traceback.format_exc())
-        return {"error": f"Failed to search telemetry records: {str(e)}"}
-
-
-@mcp.tool()
-async def telemetry_find_content(element_id: str, content_group_id: str = None) -> TelemetryResponse | ErrorResponse:
-    """Find content created from a telemetry episode.
-    
-    Args:
-        element_id: The Neo4j element ID of the telemetry node (e.g., "494")
-        content_group_id: Optional content group_id to search within. If not provided, 
-                         will use the client_group_id from the telemetry record.
-    """
-    if not telemetry_client:
-        return {"error": "Telemetry system is not enabled"}
-    
-    try:
-        # First get the telemetry record to get the episode name
-        query = """
-        MATCH (e) WHERE id(e) = $element_id AND e.group_id = 'graphiti_logs'
-        RETURN e.episode_name as episode_name, e.client_group_id as client_group_id
-        """
-        
-        results = await telemetry_client.run_query(query, {"element_id": int(element_id)})
-        
-        if not results or not results[0].get('episode_name'):
-            return {"error": f"No telemetry record found for element ID: {element_id}"}
-            
-        # Find related content using the episode name
-        related_content = await telemetry_client.find_related_content(
-            results[0]['episode_name'],
-            content_group_id=content_group_id or results[0].get('client_group_id')
-        )
-        
-        if not related_content.get("content_found", False):
-            return {
-                "data": related_content,
-                "message": f"No content found for telemetry record {element_id}. Reason: {related_content.get('reason', 'Unknown')}"
-            }
-            
-        return {
-            "data": related_content,
-            "message": f"Found related content for telemetry record {element_id}"
-        }
-    except Exception as e:
-        logger.error(f"Error finding content for telemetry record: {e}")
-        logger.error(traceback.format_exc())
-        return {"error": f"Failed to find content for telemetry record: {str(e)}"}
-
-
-@mcp.tool()
-async def telemetry_fuzzy_search(
-    partial_name: str,
-    limit: int = 1,
-    include_content_info: bool = True
-) -> TelemetryResponse | ErrorResponse:
-    """Find telemetry episodes by partial name or identifier.
-    
-    Args:
-        partial_name: A partial episode name or identifier to search for (e.g., "ADR-013")
-        limit: Maximum number of results to return (default: 1)
-        include_content_info: (ignored, kept for compatibility)
-        
-    Returns:
-        A list of telemetry nodes from the graphiti_logs group, each including its elementId
-        
-    Example:
-        telemetry_fuzzy_search("Caviar and Pancake")
-    """
-    if not telemetry_client:
-        return {"error": "Telemetry system is not enabled"}
-        
-    try:
-        # Query to find the most complete records
-        query = """
-        MATCH (e)
-        WHERE e.group_id = 'graphiti_logs' 
-        AND (
-            e.original_name CONTAINS $partial_name OR
-            e.episode_name CONTAINS $partial_name
-        )
-        AND e.start_time IS NOT NULL
-        AND e.end_time IS NOT NULL
-        AND e.client_group_id IS NOT NULL
-        RETURN e.original_name as original_name,
-               e.episode_name as episode_name,
-               e.status as status,
-               e.start_time as start_time,
-               e.end_time as end_time,
-               e.processing_time_ms as processing_time_ms,
-               e.client_group_id as client_group_id,
-               e.tracking_id as tracking_id,
-               id(e) as elementId
-        ORDER BY e.end_time DESC
-        LIMIT $limit
-        """
-        
-        params = {
-            "partial_name": partial_name,
-            "limit": limit
-        }
-        
-        results = await telemetry_client.run_query(query, params)
-        
-        if not results:
-            return {
-                "data": [],
-                "message": f"No telemetry records found matching '{partial_name}'"
-            }
-            
-        entries = []
-        for result in results:
-            entry = {
-                "original_name": result.get("original_name", "Unknown"),
-                "episode_name": result.get("episode_name", "Unknown"),
-                "status": result.get("status", "Unknown"),
-                "start_time": result.get("start_time", "Unknown"),
-                "end_time": result.get("end_time", "Unknown"),
-                "processing_time_ms": result.get("processing_time_ms", 0),
-                "client_group_id": result.get("client_group_id", "Unknown"),
-                "tracking_id": result.get("tracking_id", "Unknown"),
-                "elementId": result.get("elementId", "Unknown")
-            }
-            entries.append(entry)
-        return {
-            "data": entries,
-            "message": f"Found {len(entries)} telemetry record(s) for '{partial_name}'"
-        }
-    except Exception as e:
-        logger.error(f"Error in telemetry_fuzzy_search: {str(e)}")
-        logger.error(traceback.format_exc())
-        return {"error": f"Failed to search telemetry records: {str(e)}"}
-
-
-@mcp.tool()
-async def telemetry_format_results(
-    episode_data: dict,
-    highlight_errors: bool = True,
-    include_steps: bool = True
-) -> TelemetryResponse | ErrorResponse:
-    """Format telemetry data into a human-readable summary.
-    
-    This function takes the raw telemetry data (typically from telemetry_episode_trace)
-    and formats it into a structured, easy-to-read summary focusing on key information.
-    
-    Args:
-        episode_data: The raw episode data from telemetry_episode_trace
-        highlight_errors: Whether to highlight errors in processing steps (default: True)
-        include_steps: Whether to include detailed processing steps (default: True)
-        
-    Returns:
-        A formatted summary of the telemetry data
-        
-    Example:
-        raw_data = telemetry_episode_trace("ADR-013: Integration of Mem0g...")
-        telemetry_format_results(raw_data["data"])
-    """
-    if not episode_data:
-        return {"error": "No episode data provided"}
-        
-    try:
-        # Extract episode information
-        episode = episode_data.get("episode", {})
-        steps = episode_data.get("steps", [])
-        timeline = episode_data.get("timeline", [])
-        tracking = episode_data.get("tracking", [])
-        outcome_summary = episode_data.get("outcome_summary", {})
-        related_content = episode_data.get("related_content", {})
-        
-        # Create basic summary
-        summary = {
-            "episode_name": episode.get("episode_name", "Unknown"),
-            "status": episode.get("status", "Unknown"),
-            "start_time": episode.get("start_time", "Unknown"),
-            "end_time": episode.get("end_time", "Unknown"),
-            "processing_time_ms": episode.get("processing_time_ms", 0),
-            "client_group_id": episode.get("client_group_id", "Unknown"),
-            "group_id": episode.get("group_id", "Unknown"),
-            "attempt_count": episode.get("attempt_count", 0),
-        }
-        
-        # Add outcome summary
-        if outcome_summary:
-            summary["outcome"] = {
-                "success": outcome_summary.get("success", False),
-                "error_count": outcome_summary.get("error_count", 0),
-                "total_steps": outcome_summary.get("total_steps", 0),
-                "completion_time": outcome_summary.get("completion_time", "Unknown"),
-            }
-        
-        # Add related content summary if available
-        if related_content:
-            content_nodes = related_content.get("content_nodes", [])
-            summary["content"] = {
-                "found": related_content.get("content_found", False),
-                "node_count": len(content_nodes),
-                "nodes": [
-                    {
-                        "name": node.get("name", "Unknown"),
-                        "uuid": node.get("uuid", "Unknown"),
-                        "group_id": node.get("group_id", "Unknown"),
-                        "created_at": node.get("created_at", "Unknown"),
-                    }
-                    for node in content_nodes[:3]  # Limit to first 3 for brevity
-                ]
-            }
-        
-        # Add processing steps if requested
-        if include_steps and steps:
-            # Group steps by name to show progression
-            step_groups = {}
-            for step in steps:
-                step_name = step.get("step_name", "unknown")
-                if step_name not in step_groups:
-                    step_groups[step_name] = []
-                    
-                step_info = {
-                    "status": step.get("status", "unknown"),
-                    "start_time": step.get("start_time", "unknown"),
-                    "end_time": step.get("end_time", "unknown"),
-                    "data": step.get("data", "{}"),
-                }
-                
-                # Highlight errors if requested
-                if highlight_errors and step.get("status") != "success":
-                    step_info["error"] = True
-                    
-                step_groups[step_name].append(step_info)
-            
-            summary["steps"] = step_groups
-        
-        return {
-            "data": summary,
-            "message": f"Formatted telemetry summary for {summary['episode_name']}"
-        }
-    except Exception as e:
-        logger.error(f"Error formatting telemetry results: {str(e)}")
-        logger.error(traceback.format_exc())
-        return {"error": f"Failed to format telemetry results: {str(e)}"}
+# Telemetry MCP tool functions have been removed
 
 
 # register_group tool removed to enforce the two-step workflow
@@ -2111,63 +1636,4 @@ def main():
 if __name__ == '__main__':
     main()
 
-@mcp.tool()
-async def telemetry_enumerate_connected_nodes(elementId: str) -> TelemetryResponse | ErrorResponse:
-    """Enumerate all nodes directly connected to a telemetry log node by elementId.
-    Returns the log node, all directly connected nodes, and the relationships (both incoming and outgoing).
-    Args:
-        elementId: The Neo4j element ID of the telemetry log node (can be numeric or compound)
-    Returns:
-        Dictionary with the log node, a list of connected nodes, and their relationships.
-    """
-    if not telemetry_client:
-        return {"error": "Telemetry system is not enabled"}
-    try:
-        # Extract numeric ID from compound ID if needed
-        numeric_id = elementId
-        if ':' in elementId:
-            numeric_id = elementId.split(':')[-1]
-        numeric_id = int(numeric_id)
-
-        # Query for the log node and all directly connected nodes (both directions)
-        query = '''
-        MATCH (log)
-        WHERE id(log) = $elementId AND log.group_id = 'graphiti_logs'
-        OPTIONAL MATCH (log)-[r_out]->(n_out)
-        OPTIONAL MATCH (n_in)-[r_in]->(log)
-        RETURN log,
-               collect(DISTINCT {direction: 'out', rel_type: type(r_out), node: n_out}) AS outgoing,
-               collect(DISTINCT {direction: 'in', rel_type: type(r_in), node: n_in}) AS incoming
-        '''
-        results = await telemetry_client.run_query(query, {"elementId": numeric_id})
-        if not results or not results[0].get('log'):
-            return {"error": f"No telemetry log node found for element ID: {elementId}"}
-        log_node = results[0]['log']
-        outgoing = [rel for rel in results[0]['outgoing'] if rel['node'] is not None]
-        incoming = [rel for rel in results[0]['incoming'] if rel['node'] is not None]
-        # Format nodes for output (convert datetimes to isoformat)
-        def format_node(node):
-            if not node:
-                return None
-            return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in node.items()}
-        formatted_log = format_node(log_node)
-        formatted_outgoing = [
-            {"direction": rel['direction'], "rel_type": rel['rel_type'], "node": format_node(rel['node'])}
-            for rel in outgoing
-        ]
-        formatted_incoming = [
-            {"direction": rel['direction'], "rel_type": rel['rel_type'], "node": format_node(rel['node'])}
-            for rel in incoming
-        ]
-        return {
-            "data": {
-                "log_node": formatted_log,
-                "outgoing": formatted_outgoing,
-                "incoming": formatted_incoming
-            },
-            "message": f"Enumerated all directly connected nodes for telemetry log {elementId}"
-        }
-    except Exception as e:
-        logger.error(f"Error enumerating connected telemetry nodes: {e}")
-        logger.error(traceback.format_exc())
-        return {"error": f"Failed to enumerate connected telemetry nodes: {str(e)}"}
+# Last telemetry MCP tool function has been removed
