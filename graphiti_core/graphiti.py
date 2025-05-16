@@ -508,6 +508,23 @@ class Graphiti:
 
             if not self.store_raw_episode_content:
                 episode.content = ''
+                
+            # Generate embedding for the episode content
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_name=name,
+                    step_name="episode_embedding", 
+                    status="started"
+                )
+                
+            await episode.generate_embedding(self.embedder)
+            
+            if telemetry_client:
+                await telemetry_client.record_processing_step(
+                    episode_name=name,
+                    step_name="episode_embedding", 
+                    status="success"
+                )
 
             if telemetry_client:
                 await telemetry_client.record_processing_step(
@@ -611,6 +628,25 @@ class Graphiti:
                 for episode in bulk_episodes
             ]
 
+            # Generate embeddings for episodes
+            if telemetry_client:
+                for episode in episodes:
+                    await telemetry_client.record_processing_step(
+                        episode_name=episode.name,
+                        step_name="episode_embedding", 
+                        status="started"
+                    )
+                    
+            await semaphore_gather(*[episode.generate_embedding(self.embedder) for episode in episodes])
+            
+            if telemetry_client:
+                for episode in episodes:
+                    await telemetry_client.record_processing_step(
+                        episode_name=episode.name,
+                        step_name="episode_embedding", 
+                        status="success"
+                    )
+            
             # Save all the episodes
             if telemetry_client:
                 for episode in episodes:

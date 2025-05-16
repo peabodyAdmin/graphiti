@@ -152,6 +152,15 @@ class EpisodicNode(Node):
     )
     labels: list[str] = Field(default_factory=list, description='descriptive labels for the episode')
     tags: list[str] = Field(default_factory=list, description='tags for the episode')
+    embedding: list[float] | None = Field(default=None, description='embedding of the episode content')
+
+    async def generate_embedding(self, embedder: EmbedderClient):
+        start = time()
+        text = self.content.replace('\n', ' ')
+        self.embedding = await embedder.create(input_data=[text])
+        end = time()
+        logger.debug(f'embedded episode content in {end - start} ms')
+        return self.embedding
 
     async def save(self, driver: AsyncDriver):
         result = await driver.execute_query(
@@ -167,6 +176,7 @@ class EpisodicNode(Node):
             source=self.source.value,
             labels=self.labels,
             tags=self.tags,
+            embedding=self.embedding,
             database_=DEFAULT_DATABASE,
         )
 
@@ -187,7 +197,10 @@ class EpisodicNode(Node):
             e.group_id AS group_id,
             e.source_description AS source_description,
             e.source AS source,
-            e.entity_edges AS entity_edges
+            e.entity_edges AS entity_edges,
+            e.embedding AS embedding,
+            e.labels AS labels,
+            e.tags AS tags
         """,
             uuid=uuid,
             database_=DEFAULT_DATABASE,
@@ -215,7 +228,10 @@ class EpisodicNode(Node):
             e.group_id AS group_id,
             e.source_description AS source_description,
             e.source AS source,
-            e.entity_edges AS entity_edges
+            e.entity_edges AS entity_edges,
+            e.embedding AS embedding,
+            e.labels AS labels,
+            e.tags AS tags
         """,
             uuids=uuids,
             database_=DEFAULT_DATABASE,
@@ -252,7 +268,10 @@ class EpisodicNode(Node):
             e.group_id AS group_id,
             e.source_description AS source_description,
             e.source AS source,
-            e.entity_edges AS entity_edges
+            e.entity_edges AS entity_edges,
+            e.embedding AS embedding,
+            e.labels AS labels,
+            e.tags AS tags
         ORDER BY e.uuid DESC
         """
             + limit_query,
@@ -281,7 +300,10 @@ class EpisodicNode(Node):
             e.group_id AS group_id,
             e.source_description AS source_description,
             e.source AS source,
-            e.entity_edges AS entity_edges
+            e.entity_edges AS entity_edges,
+            e.embedding AS embedding,
+            e.labels AS labels,
+            e.tags AS tags
         """,
             entity_node_uuid=entity_node_uuid,
             database_=DEFAULT_DATABASE,
@@ -532,6 +554,7 @@ def get_episodic_node_from_record(record: Any) -> EpisodicNode:
         entity_edges=record['entity_edges'],
         labels=record['labels'],
         tags=record['tags'],
+        embedding=record.get('embedding'),
     )
 
 
