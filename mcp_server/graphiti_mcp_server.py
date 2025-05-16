@@ -1006,23 +1006,28 @@ async def add_episode(
             
             # Check if we have a high-confidence match for auto-assignment
             if similarity_result.auto_assign and similarity_result.similar_groups:
-                # High confidence match found, auto-assign
+                # High confidence match found, but we need to check if the group exists
                 auto_group_id = similarity_result.suggested_group_id
                 
-                # Get or create a queue for this group_id
-                if auto_group_id not in episode_queues:
-                    episode_queues[auto_group_id] = asyncio.Queue()
-                    # Start a task to process episodes for this group_id
-                    asyncio.create_task(process_episode_queue(auto_group_id))
+                # Check if the group exists in registry
+                group_info = await registry.get_group(auto_group_id)
+                
+                if group_info:  # Only auto-assign if the group already exists
+                    # Get or create a queue for this group_id
+                    if auto_group_id not in episode_queues:
+                        episode_queues[auto_group_id] = asyncio.Queue()
+                        # Start a task to process episodes for this group_id
+                        asyncio.create_task(process_episode_queue(auto_group_id))
 
-                # Add the episode to the queue
-                await episode_queues[auto_group_id].put(episode_data)
+                    # Add the episode to the queue
+                    await episode_queues[auto_group_id].put(episode_data)
 
-                return {
-                    'message': f'Episode automatically assigned to group: {auto_group_id} (confidence: {similarity_result.confidence:.2f})',
-                    'auto_assigned': True,
-                    'group_id': auto_group_id
-                }
+                    return {
+                        'message': f'Episode automatically assigned to group: {auto_group_id} (confidence: {similarity_result.confidence:.2f})',
+                        'auto_assigned': True,
+                        'group_id': auto_group_id
+                    }
+                # If group doesn't exist, continue to pending flow even with high confidence
             else:
                 # No high-confidence match, store as pending episode
                 pending_storage = PendingEpisodesStorage()

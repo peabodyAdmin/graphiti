@@ -24,7 +24,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-from datetime import datetime
+from datetime import datetime, timezone
 from time import time
 
 from dotenv import load_dotenv
@@ -536,8 +536,63 @@ class Graphiti:
                     status="started"
                 )
                 
+            # Initialize registry_uuid for later use
+            registry_uuid = None
+            
+            # Check if the GroupRegistry node exists for this group_id
+            if group_id:
+                # First, handle group registry resolution at the beginning
+                if telemetry_client:
+                    await telemetry_client.record_processing_step(
+                        episode_name=name,
+                        step_name="group_registry_resolution", 
+                        status="started"
+                    )
+                
+                # Check if the GroupRegistry node exists for this group_id
+                registry_result = await self.driver.execute_query(
+                    """
+                    MATCH (g:GroupRegistry {group_id: $group_id})
+                    RETURN g.uuid AS registry_uuid
+                    """,
+                    group_id=group_id,
+                    database_=DEFAULT_DATABASE
+                )
+                
+                # Extract the UUID from the result if it exists
+                if registry_result[0]:
+                    registry_uuid = registry_result[0][0]["registry_uuid"]
+                    logger.info(f"Found existing GroupRegistry for group_id: {group_id}")
+                else:
+                    logger.info(f"No GroupRegistry found for group_id: {group_id}")
+                
+                if telemetry_client:
+                    await telemetry_client.record_processing_step(
+                        episode_name=name,
+                        step_name="group_registry_resolution", 
+                        status="success",
+                        data={"registry_uuid": registry_uuid}
+                    )
+
+            # Create group registry edge if group_id is provided
+            group_registry_edges = []
+            if group_id:  # Check for group_id instead of registry_uuid
+                # Create a BELONGS_TO edge from the episode to the group registry
+                from graphiti_core.edges import GroupRegistryEdge
+                from uuid import uuid4
+                
+                group_registry_edge = GroupRegistryEdge(
+                    uuid=str(uuid4()),
+                    source_node_uuid=episode.uuid,
+                    target_node_uuid=registry_uuid,  # This can be None, it's not used in the query
+                    group_id=group_id,
+                    created_at=now
+                )
+                group_registry_edges.append(group_registry_edge)
+            
+            # Save all nodes, edges, and group registry edges in a single transaction
             await add_nodes_and_edges_bulk(
-                self.driver, [episode], episodic_edges, hydrated_nodes, entity_edges
+                self.driver, [episode], episodic_edges, hydrated_nodes, entity_edges, group_registry_edges
             )
             
             # Record successful database update
@@ -550,29 +605,11 @@ class Graphiti:
                         "episode_count": 1,
                         "episodic_edge_count": len(episodic_edges),
                         "node_count": len(hydrated_nodes),
-                        "entity_edge_count": len(entity_edges)
+                        "entity_edge_count": len(entity_edges),
+                        "group_registry_edge_count": len(group_registry_edges)
                     }
                 )
-                
-            # Create edge to group registry if applicable
-            if group_id:
-                if telemetry_client:
-                    await telemetry_client.record_processing_step(
-                        episode_name=name,
-                        step_name="group_registry_edge_creation", 
-                        status="started"
-                    )
-                
-                group_registry_edge = await create_group_registry_edge_for_episode(self.driver, episode)
-                
-                if telemetry_client:
-                    await telemetry_client.record_processing_step(
-                        episode_name=name,
-                        step_name="group_registry_edge_creation", 
-                        status="success",
-                        data={"edge_created": group_registry_edge is not None}
-                    )
-
+            
             # Update any communities
             if update_communities:
                 await semaphore_gather(
@@ -775,8 +812,49 @@ class Graphiti:
             # save edges to KG
             await semaphore_gather(*[edge.save(self.driver) for edge in edges])
             
-            # Create edges to group registry if applicable
+            # Initialize registry_uuid for later use
+            registry_uuid = None
+            
+            # Resolve group registry first if a group_id is provided
             if group_id:
+                # First, handle group registry resolution at the beginning
+                if telemetry_client:
+                    for episode in episodes:
+                        await telemetry_client.record_processing_step(
+                            episode_name=episode.name,
+                            step_name="group_registry_resolution", 
+                            status="started"
+                        )
+                
+                # Check if the GroupRegistry node exists for this group_id
+                registry_result = await self.driver.execute_query(
+                    """
+                    MATCH (g:GroupRegistry {group_id: $group_id})
+                    RETURN g.uuid AS registry_uuid
+                    """,
+                    group_id=group_id,
+                    database_=DEFAULT_DATABASE
+                )
+                
+                # Extract the UUID from the result if it exists
+                if registry_result[0]:
+                    registry_uuid = registry_result[0][0]["registry_uuid"]
+                    logger.info(f"Found existing GroupRegistry for group_id: {group_id}")
+                else:
+                    logger.info(f"No GroupRegistry found for group_id: {group_id}")
+                
+                if telemetry_client:
+                    for episode in episodes:
+                        await telemetry_client.record_processing_step(
+                            episode_name=episode.name,
+                            step_name="group_registry_resolution", 
+                            status="success",
+                            data={"registry_uuid": registry_uuid}
+                        )
+
+            # Prepare group registry edges if group_id is provided
+            group_registry_edges = []
+            if group_id:  # Check for group_id instead of registry_uuid
                 if telemetry_client:
                     for episode in episodes:
                         await telemetry_client.record_processing_step(
@@ -785,20 +863,34 @@ class Graphiti:
                             status="started"
                         )
                 
-                # Create group registry edges for all episodes
-                group_registry_edges = await semaphore_gather(
-                    *[create_group_registry_edge_for_episode(self.driver, episode) for episode in episodes]
-                )
+                # Create the edges
+                from uuid import uuid4
+                from graphiti_core.edges import GroupRegistryEdge
+                
+                for episode in episodes:
+                    group_registry_edge = GroupRegistryEdge(
+                        uuid=str(uuid4()),
+                        source_node_uuid=episode.uuid,
+                        target_node_uuid=registry_uuid,  # Using the UUID we resolved earlier
+                        group_id=group_id,
+                        created_at=datetime.now(timezone.utc)
+                    )
+                    group_registry_edges.append(group_registry_edge)
                 
                 if telemetry_client:
-                    for i, episode in enumerate(episodes):
+                    for episode in episodes:
                         await telemetry_client.record_processing_step(
                             episode_name=episode.name,
                             step_name="group_registry_edge_creation", 
                             status="success",
-                            data={"edge_created": group_registry_edges[i] is not None}
+                            data={"edge_created": True}
                         )
-
+                
+                # Create the group registry edges in a transaction
+                await add_nodes_and_edges_bulk(
+                    self.driver, [], [], [], [], group_registry_edges
+                )
+            
             end = time()
             processing_time_ms = (end - start) * 1000
             logger.info(f'Completed add_episode_bulk in {processing_time_ms} ms')

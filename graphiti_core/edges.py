@@ -359,6 +359,7 @@ class GroupRegistryEdge(Edge):
         result = await driver.execute_query(
             GROUP_REGISTRY_EDGE_SAVE,
             episode_uuid=self.source_node_uuid,
+            registry_uuid=self.target_node_uuid,
             group_id=self.group_id,
             uuid=self.uuid,
             created_at=self.created_at,
@@ -430,7 +431,7 @@ class GroupRegistryEdge(Edge):
         records, _, _ = await driver.execute_query(
             """
         MATCH (n:Episodic)-[e:BELONGS_TO]->(m:GroupRegistry)
-        WHERE e.group_id IN $group_ids
+        WHERE m.group_id IN $group_ids
         """
             + cursor_query
             + """

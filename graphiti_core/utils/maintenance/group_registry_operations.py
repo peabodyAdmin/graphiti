@@ -97,22 +97,42 @@ async def create_group_registry_edges(driver: AsyncDriver) -> Dict[str, Any]:
                     g.created_at = datetime(),
                     g.creator = 'system',
                     g.description = $description,
-                    g.name = $group_id
+                    g.name = $group_id,
+                    g.uuid = $uuid
                 MERGE (root)-[:CONTAINS]->(g)
                 """,
                 group_id=group_id,
                 description=f"Auto-created group for {group_id}",
+                uuid=str(uuid4()),
                 database_=DEFAULT_DATABASE
             )
             
             stats["missing_group_registry"] += 1
         
         try:
-            # Create the edge
+            # Get the UUID of the GroupRegistry node
+            registry_result = await driver.execute_query(
+                """
+                MATCH (g:GroupRegistry {group_id: $group_id})
+                RETURN g.uuid AS registry_uuid
+                """,
+                group_id=group_id,
+                database_=DEFAULT_DATABASE
+            )
+            
+            # Extract the UUID from the result
+            registry_uuid = registry_result[0][0]["registry_uuid"] if registry_result[0] else None
+            
+            if not registry_uuid:
+                logger.error(f"Could not find GroupRegistry node for group_id: {group_id}")
+                stats["errors"] += 1
+                continue
+            
+            # Create the edge with the correct target_node_uuid
             edge = GroupRegistryEdge(
                 uuid=str(uuid4()),
                 source_node_uuid=episode_uuid,
-                target_node_uuid=None,  # Will be set by the query
+                target_node_uuid=registry_uuid,  # Now using the actual UUID
                 group_id=group_id,
                 created_at=datetime.now(timezone.utc)
             )
@@ -178,18 +198,21 @@ async def create_group_registry_edge_for_episode(
                 g.created_at = datetime(),
                 g.creator = 'system',
                 g.description = $description,
-                g.name = $group_id
+                g.name = $group_id,
+                g.uuid = $uuid
             MERGE (root)-[:CONTAINS]->(g)
             """,
             group_id=episode.group_id,
             description=f"Auto-created group for {episode.group_id}",
+            uuid=str(uuid4()),
             database_=DEFAULT_DATABASE
         )
     
     # Check if the edge already exists
     edge_exists_result = await driver.execute_query(
         """
-        MATCH (e:Episodic {uuid: $episode_uuid})-[:BELONGS_TO]->(:GroupRegistry {group_id: $group_id})
+        MATCH (e:Episodic {uuid: $episode_uuid})-[:BELONGS_TO]->(g:GroupRegistry)
+        WHERE g.uuid IS NOT NULL AND g.group_id = $group_id
         RETURN count(*) AS edge_count
         """,
         episode_uuid=episode.uuid,
@@ -202,11 +225,28 @@ async def create_group_registry_edge_for_episode(
         return None
     
     try:
-        # Create the edge
+        # Get the UUID of the GroupRegistry node
+        registry_result = await driver.execute_query(
+            """
+            MATCH (g:GroupRegistry {group_id: $group_id})
+            RETURN g.uuid AS registry_uuid
+            """,
+            group_id=episode.group_id,
+            database_=DEFAULT_DATABASE
+        )
+        
+        # Extract the UUID from the result
+        registry_uuid = registry_result[0][0]["registry_uuid"] if registry_result[0] else None
+        
+        if not registry_uuid:
+            logger.error(f"Could not find GroupRegistry node for group_id: {episode.group_id}")
+            return None
+        
+        # Create the edge with the correct target_node_uuid
         edge = GroupRegistryEdge(
             uuid=str(uuid4()),
             source_node_uuid=episode.uuid,
-            target_node_uuid=None,  # Will be set by the query
+            target_node_uuid=registry_uuid,  # Using the actual UUID
             group_id=episode.group_id,
             created_at=datetime.now(timezone.utc)
         )
@@ -239,7 +279,8 @@ async def get_episodes_by_group_registry(
     
     result = await driver.execute_query(
         f"""
-        MATCH (e:Episodic)-[:BELONGS_TO]->(g:GroupRegistry {{group_id: $group_id}})
+        MATCH (e:Episodic)-[:BELONGS_TO]->(g:GroupRegistry)
+        WHERE g.group_id = $group_id
         RETURN e
         ORDER BY e.created_at DESC
         {limit_clause}

@@ -73,12 +73,18 @@ class GroupRegistry:
             g.created_at = datetime(),
             g.creator = $creator,
             g.description = $description,
-            g.name = $group_id
+            g.name = $group_id,
+            g.uuid = $uuid
         ON MATCH SET 
             g.updated_at = datetime(),
-            g.description = $description
+            g.description = $description,
+            g.uuid = COALESCE(g.uuid, $uuid)
         MERGE (root)-[:CONTAINS]->(g)
         """
+        
+        # Generate a UUID for the group if not provided in metadata
+        from uuid import uuid4
+        group_uuid = metadata.get("uuid", str(uuid4())) if metadata else str(uuid4())
         
         # Add metadata if provided
         if metadata:
@@ -88,6 +94,7 @@ class GroupRegistry:
                 "group_id": group_id,
                 "description": description,
                 "creator": creator,
+                "uuid": group_uuid,
             }
             
             for key, value in metadata.items():
@@ -107,6 +114,7 @@ class GroupRegistry:
                     "group_id": group_id,
                     "description": description,
                     "creator": creator,
+                    "uuid": group_uuid,
                 }
             )
             

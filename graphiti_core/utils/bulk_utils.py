@@ -95,10 +95,11 @@ async def add_nodes_and_edges_bulk(
     episodic_edges: list[EpisodicEdge],
     entity_nodes: list[EntityNode],
     entity_edges: list[EntityEdge],
+    group_registry_edges: list[Edge] = None,
 ):
     async with driver.session(database=DEFAULT_DATABASE) as session:
         await session.execute_write(
-            add_nodes_and_edges_bulk_tx, episodic_nodes, episodic_edges, entity_nodes, entity_edges
+            add_nodes_and_edges_bulk_tx, episodic_nodes, episodic_edges, entity_nodes, entity_edges, group_registry_edges
         )
 
 
@@ -108,6 +109,7 @@ async def add_nodes_and_edges_bulk_tx(
     episodic_edges: list[EpisodicEdge],
     entity_nodes: list[EntityNode],
     entity_edges: list[EntityEdge],
+    group_registry_edges: list[Edge] = None,
 ):
     episodes = [dict(episode) for episode in episodic_nodes]
     for episode in episodes:
@@ -133,6 +135,14 @@ async def add_nodes_and_edges_bulk_tx(
         EPISODIC_EDGE_SAVE_BULK, episodic_edges=[edge.model_dump() for edge in episodic_edges]
     )
     await tx.run(ENTITY_EDGE_SAVE_BULK, entity_edges=[edge.model_dump() for edge in entity_edges])
+    
+    # Create group registry edges if provided
+    if group_registry_edges and len(group_registry_edges) > 0:
+        from graphiti_core.models.edges.edge_db_queries import GROUP_REGISTRY_EDGE_SAVE_BULK
+        await tx.run(
+            GROUP_REGISTRY_EDGE_SAVE_BULK, 
+            registry_edges=[edge.model_dump() for edge in group_registry_edges]
+        )
 
 
 async def extract_nodes_and_edges_bulk(
