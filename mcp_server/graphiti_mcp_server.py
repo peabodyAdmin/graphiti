@@ -1454,10 +1454,11 @@ async def get_telemetry_log_root_fuzzy_search(search_term: str, limit: int = 10)
     
     try:
         # Case-insensitive search on original_name
+        # Explicitly request elementId and id using Neo4j functions
         query = """
         MATCH (l:EpisodeProcessingLog {group_id: 'graphiti_logs'})
         WHERE toLower(l.original_name) CONTAINS toLower($search_term)
-        RETURN l
+        RETURN l, elementId(l) as elementId, id(l) as id
         LIMIT $limit
         """
         
@@ -1473,8 +1474,8 @@ async def get_telemetry_log_root_fuzzy_search(search_term: str, limit: int = 10)
             if 'l' in record and record['l']:
                 node = record['l']
                 formatted_node = {
-                    "elementId": node.get('elementId', ''),
-                    "id": node.get('id', ''),
+                    "elementId": record.get('elementId', ''),  # Use explicitly returned elementId
+                    "id": record.get('id', ''),                # Use explicitly returned id
                     "attempt_count": node.get('attempt_count', 0),
                     "client_group_id": node.get('client_group_id', ''),
                     "end_time": node.get('end_time', ''),
@@ -1493,6 +1494,116 @@ async def get_telemetry_log_root_fuzzy_search(search_term: str, limit: int = 10)
         logger.error(f"Error searching telemetry logs: {error_msg}")
         return {"error": f"Error searching telemetry logs: {error_msg}"}
 
+
+async def get_connected_telemetry_nodes(elementId: str, limit: int = 1000) -> dict[str, Any]:
+    """
+    Get all nodes connected to an EpisodeProcessingLog node by its elementId.
+    
+    This function returns a complete picture of the processing flow, including all timing information,
+    processing steps, and errors, in chronological order.
+    
+    Args:
+        elementId: The elementId of the EpisodeProcessingLog node
+        limit: Maximum number of nodes to return per relationship type (default: 1000)
+        
+    Returns:
+        Dictionary containing:
+        - root_node: The EpisodeProcessingLog node details
+        - connected_nodes: All connected nodes grouped by relationship type
+        - timeline: Nodes arranged in chronological order
+    """
+    if telemetry_client is None:
+        return {"error": "Telemetry client not initialized"}
+    
+    try:
+        # First get the root node details
+        root_query = """
+        MATCH (log)
+        WHERE elementId(log) = $elementId
+        RETURN log, elementId(log) as elementId, id(log) as id, labels(log) as labels
+        """
+        
+        root_result = await telemetry_client.run_query(root_query, {"elementId": elementId})
+        
+        if not root_result or len(root_result) == 0:
+            return {"error": f"No node found with elementId: {elementId}"}
+        
+        # Format the root node
+        root_node = {
+            "elementId": root_result[0].get('elementId', ''),
+            "id": root_result[0].get('id', ''),
+            "labels": root_result[0].get('labels', []),
+            "properties": root_result[0].get('log', {})
+        }
+        
+        # Get all connected nodes with complete details
+        connected_query = """
+        MATCH (log)-[r]-(connected)
+        WHERE elementId(log) = $elementId
+        RETURN 
+            type(r) as relationship_type,
+            CASE WHEN startNode(r) = log THEN 'outgoing' ELSE 'incoming' END as direction,
+            connected,
+            elementId(connected) as elementId,
+            id(connected) as id,
+            labels(connected) as labels,
+            CASE 
+                WHEN 'start_time' IN keys(connected) THEN connected.start_time
+                WHEN 'created_at' IN keys(connected) THEN connected.created_at
+                ELSE null
+            END as timestamp
+        ORDER BY timestamp
+        LIMIT $limit
+        """
+        
+        connected_result = await telemetry_client.run_query(connected_query, {"elementId": elementId, "limit": limit})
+        
+        if not connected_result:
+            return {
+                "root_node": root_node,
+                "connected_nodes": {},
+                "timeline": [],
+                "message": "No connected nodes found"
+            }
+        
+        # Process the results
+        connected_by_type = {}
+        timeline = []
+        
+        for record in connected_result:
+            node_data = {
+                "elementId": record.get('elementId', ''),
+                "id": record.get('id', ''),
+                "labels": record.get('labels', []),
+                "properties": record.get('connected', {}),
+                "relationship": record.get('relationship_type', ''),
+                "direction": record.get('direction', ''),
+                "timestamp": record.get('timestamp', None)
+            }
+            
+            # Add to grouped nodes
+            rel_type = record.get('relationship_type', 'UNKNOWN')
+            if rel_type not in connected_by_type:
+                connected_by_type[rel_type] = []
+            connected_by_type[rel_type].append(node_data)
+            
+            # Add to timeline if it has a timestamp
+            if record.get('timestamp'):
+                timeline.append(node_data)
+        
+        # Sort timeline by timestamp
+        timeline.sort(key=lambda x: x.get('timestamp') if x.get('timestamp') else datetime.min)
+        
+        return {
+            "root_node": root_node,
+            "connected_nodes": connected_by_type,
+            "timeline": timeline,
+            "message": f"Found {len(timeline)} connected nodes in timeline, {len(connected_by_type)} relationship types"
+        }
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error getting connected telemetry nodes: {error_msg}")
+        return {"error": f"Error getting connected telemetry nodes: {error_msg}"}
 
 async def run_mcp_server():
     """Run the MCP server in the current event loop."""
@@ -1533,6 +1644,7 @@ async def run_mcp_server():
     # Register telemetry tools
     logger.info('Registering telemetry tools')
     mcp.tool()(get_telemetry_log_root_fuzzy_search)
+    mcp.tool()(get_connected_telemetry_nodes)
 
     # Get transport config from mcp_config, don't rely on settings object
     transport = mcp_config.transport
