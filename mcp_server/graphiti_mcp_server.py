@@ -1738,6 +1738,7 @@ async def run_mcp_server():
     # Register group registry tools
     logger.info('Registering group registry tools')
     mcp.tool()(list_group_registry)
+    mcp.tool()(update_group_description)
     
     # Register telemetry tools
     logger.info('Registering telemetry tools')
@@ -1768,6 +1769,68 @@ async def run_mcp_server():
 
 # register_group tool removed to enforce the two-step workflow
 # Groups are now registered automatically through the add_episode and continue_episode_ingestion process
+
+@mcp.tool()
+async def update_group_description(
+    group_id: str,
+    description: str,
+) -> dict[str, Any] | ErrorResponse:
+    """Update only the description field of an existing group in the group registry.
+    
+    This function verifies that the group_id exists in the registry and updates
+    only its description field, leaving all other fields unchanged.
+    
+    Args:
+        group_id (str): The existing group_id to update
+        description (str): The new description to set for this group
+        
+    Returns:
+        Dictionary with updated group information or error response
+    """
+    try:
+        # Input validation
+        if not group_id or not isinstance(group_id, str):
+            return {"error": "Invalid group_id: must be a non-empty string", "status_code": 400}
+            
+        if not description or not isinstance(description, str):
+            return {"error": "Invalid description: must be a non-empty string", "status_code": 400}
+        
+        # Initialize the group registry
+        from services.group_registry import GroupRegistry
+        registry = GroupRegistry(graphiti_client.driver)
+        
+        # Check if the group is protected
+        if registry.is_protected_group(group_id):
+            return {"error": f"Cannot modify protected group: {group_id}", "status_code": 403}
+        
+        # Check if the group exists
+        group_info = await registry.get_group(group_id)
+        if not group_info:
+            return {"error": f"Group not found: {group_id}", "status_code": 404}
+        
+        # Update only the description field
+        from services.group_registry import GROUP_REGISTRY_LABEL
+        await registry.driver.execute_query(
+            f"""
+            MATCH (g:{GROUP_REGISTRY_LABEL} {{group_id: $group_id}})
+            SET g.description = $description,
+                g.updated_at = datetime()
+            """,
+            {"group_id": group_id, "description": description}
+        )
+        
+        logger.info(f"Updated description for group: {group_id}")
+        
+        # Return the updated group info
+        updated_group = await registry.get_group(group_id)
+        return {
+            "message": f"Group description updated successfully",
+            "group": updated_group
+        }
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error updating group description: {error_msg}")
+        return {"error": f"Error updating group description: {error_msg}", "status_code": 500}
 
 @mcp.tool()
 async def list_group_registry(
