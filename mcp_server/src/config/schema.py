@@ -64,7 +64,10 @@ class YamlSettingsSource(PydanticBaseSettingsSource):
     def __call__(self) -> dict[str, Any]:
         """Load and parse YAML configuration."""
         if not self.config_path.exists():
-            return {}
+            raise FileNotFoundError(
+                f'Config file not found at {self.config_path}. '
+                'Set CONFIG_PATH or run from the repository root.'
+            )
 
         with open(self.config_path) as f:
             raw_config = yaml.safe_load(f) or {}
@@ -255,7 +258,20 @@ class GraphitiConfig(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Customize settings sources to include YAML."""
-        config_path = Path(os.environ.get('CONFIG_PATH', 'config/config.yaml'))
+        raw_config_path = os.environ.get('CONFIG_PATH', 'config/config.yaml')
+        config_path = Path(raw_config_path)
+
+        # Resolve relative paths: first relative to CWD, then relative to repo (two levels up from this file)
+        if not config_path.is_absolute():
+            cwd_candidate = Path.cwd() / config_path
+            if cwd_candidate.exists():
+                config_path = cwd_candidate
+            else:
+                repo_root = Path(__file__).resolve().parents[2]
+                repo_candidate = repo_root / config_path
+                if repo_candidate.exists():
+                    config_path = repo_candidate
+
         yaml_settings = YamlSettingsSource(settings_cls, config_path)
         # Priority: CLI args (init) > env vars > yaml > defaults
         return (init_settings, env_settings, yaml_settings, dotenv_settings)

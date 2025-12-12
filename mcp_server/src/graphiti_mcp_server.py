@@ -837,8 +837,10 @@ async def initialize_server() -> ServerConfig:
 
     args = parser.parse_args()
 
-    # Set config path in environment for the settings to pick up
-    if args.config:
+    # Set config path in environment for the settings to pick up.
+    # Respect an existing CONFIG_PATH unless the user explicitly passed --config.
+    config_arg_provided = any(arg.startswith('--config') for arg in sys.argv)
+    if config_arg_provided or 'CONFIG_PATH' not in os.environ:
         os.environ['CONFIG_PATH'] = str(args.config)
 
     # Load configuration with environment variables and YAML
