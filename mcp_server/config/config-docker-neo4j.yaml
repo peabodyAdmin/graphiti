@@ -2,9 +2,10 @@
 # This configuration is optimized for running with docker-compose-neo4j.yml
 
 server:
-  transport: "http"  # HTTP transport (SSE is deprecated)
-  host: "127.0.0.1"
-  port: 8000
+  # All values are env-driven so the same image can run HTTP (cloud) or stdio (local)
+  transport: ${MCP_TRANSPORT:http}  # Options: http (default), stdio, sse (deprecated)
+  host: ${MCP_SERVER_HOST:0.0.0.0}
+  port: ${MCP_SERVER_PORT:8000}
   
 llm:
   provider: "openai"  # Options: openai, azure_openai, anthropic, gemini, groq

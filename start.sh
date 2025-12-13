@@ -5,11 +5,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${ROOT_DIR}/.env"
+ENV_FILE="${ROOT_DIR}/canonical.env"
 COMPOSE_FILE="${ROOT_DIR}/mcp_server/docker/docker-compose-neo4j.yml"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-  echo "Missing .env in repo root. Create it (or symlink to mcp_server/.env) before starting." >&2
+  echo "Missing canonical.env in repo root. Copy from canonical.env.example and configure." >&2
   exit 1
 fi
 

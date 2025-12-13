@@ -1,10 +1,14 @@
-name: graphiti-neo4j-mcp
+name: graphiti
+
 services:
+  # ---------------------------------------------------------------------------
+  # Neo4j Database (shared by all MCP services)
+  # ---------------------------------------------------------------------------
   neo4j:
     image: neo4j:5.26.0
     ports:
-      - "7479:7474" # HTTP
-      - "7692:7687" # Bolt
+      - "${NEO4J_HTTP_PORT:-7479}:7474"
+      - "${NEO4J_BOLT_PORT:-7692}:7687"
     environment:
       - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-demodemo}
       - NEO4J_server_memory_heap_initial__size=512m
@@ -20,36 +24,62 @@ services:
       retries: 5
       start_period: 30s
 
+  # ---------------------------------------------------------------------------
+  # Graphiti MCP Server (knowledge graph with LLM-powered entity extraction)
+  # ---------------------------------------------------------------------------
   graphiti-mcp:
     image: zepai/knowledge-graph-mcp:standalone
-    # For specific versions, replace 'standalone' with a version tag:
-    #   image: zepai/knowledge-graph-mcp:1.0.0-standalone
-    # When building locally, the build section below will be used.
     build:
       context: ..
       dockerfile: docker/Dockerfile.standalone
-    env_file:
-      - path: ../.env
-        required: false
     depends_on:
       neo4j:
         condition: service_healthy
     environment:
-      # Database configuration
+      # Database - uses canonical names directly
       - NEO4J_URI=${NEO4J_URI:-bolt://neo4j:7687}
       - NEO4J_USER=${NEO4J_USER:-neo4j}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-demodemo}
       - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
-      # Application configuration
+      # Server config - override YAML hardwired values
+      - MCP_SERVER_HOST=${GRAPHITI_MCP_HOST:-0.0.0.0}
+      - MCP_SERVER_PORT=${GRAPHITI_MCP_PORT:-8000}
+      # Application
       - GRAPHITI_GROUP_ID=${GRAPHITI_GROUP_ID:-main}
       - SEMAPHORE_LIMIT=${SEMAPHORE_LIMIT:-10}
+      - GRAPHITI_TELEMETRY_ENABLED=${GRAPHITI_TELEMETRY_ENABLED:-false}
+      # LLM
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MODEL_NAME=${MODEL_NAME:-gpt-4.1-mini}
+      # Paths
       - CONFIG_PATH=/app/mcp/config/config.yaml
       - PATH=/root/.local/bin:${PATH}
     volumes:
       - ../config/config-docker-neo4j.yaml:/app/mcp/config/config.yaml:ro
     ports:
-      - "8010:8000" # Expose the MCP server via HTTP transport
+      - "${GRAPHITI_MCP_EXTERNAL_PORT:-8010}:${GRAPHITI_MCP_PORT:-8000}"
     command: ["uv", "run", "main.py"]
+
+  # ---------------------------------------------------------------------------
+  # Neo4j Cypher MCP Server (raw Cypher query access)
+  # ---------------------------------------------------------------------------
+  neo4j-cypher:
+    image: mcp/neo4j-cypher:latest
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      # Database - TRANSLATED from canonical names
+      - NEO4J_URI=${NEO4J_URI:-bolt://neo4j:7687}
+      - NEO4J_USERNAME=${NEO4J_USER:-neo4j}          # canonical NEO4J_USER → their NEO4J_USERNAME
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-demodemo}
+      - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
+      # Server config
+      - NEO4J_TRANSPORT=http
+      - NEO4J_MCP_SERVER_HOST=${NEO4J_CYPHER_MCP_HOST:-0.0.0.0}
+      - NEO4J_MCP_SERVER_PORT=${NEO4J_CYPHER_MCP_PORT:-8000}
+    ports:
+      - "${NEO4J_CYPHER_MCP_EXTERNAL_PORT:-8011}:${NEO4J_CYPHER_MCP_PORT:-8000}"
 
 volumes:
   neo4j_data:
