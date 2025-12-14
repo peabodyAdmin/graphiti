@@ -8,8 +8,7 @@
 
 | Edge Type | From → To | Properties | Replaces |
 |-----------|-----------|------------|----------|
-| OWNED_BY | Service/Tool/Process/Template/Secret/Conversation → User | created_at | ownerId, userId |
-| INSTANTIATED_FROM | Service/Tool → Template | at | serviceTemplateId, toolTemplateId |
+| OWNED_BY | Service/Tool/Process/Secret/Conversation → User | created_at | ownerId, userId |
 | USES_SERVICE | Tool → Service | connectionParams | serviceId |
 | USES_SECRET | Tool → Secret | scope | secretId |
 | DEFAULT_PROCESS | Conversation → Process | since | processId |
@@ -19,39 +18,34 @@
 | HAS_ALTERNATIVE | Turn → Alternative | isActive, sequence | embedded alternatives array |
 | RESPONDS_TO | Alternative → Alternative | none | inputContext.parentAlternativeId |
 | EXECUTED_BY | Alternative → Process | createdAt | processId |
-| BOUND_TO_EPISODE | Alternative/Summary/Introspection → Episode | source, createdAt | episodeId |
+| HAS_CONTENT | Alternative/Summary/Introspection → Episode | source, createdAt | episodeId |
 | SUMMARIZES | Summary → Episode | order | sourceEpisodeIds |
 | HAS_SUMMARY | Conversation → Summary | none | conversationId |
-| HAS_CONTENT | Summary/Introspection → Episode | none | episodeId |
 | COVERS_UP_TO | Summary → Turn | none | priorTurnId |
 | CREATED_BY_PROCESS | Summary → Process | none | createdBy |
 | HAS_ACTIVE_ENTITY | Conversation → Entity | addedAt, relevance | activeEntities |
-| SCOPED_TO | Episode/Entity → Conversation/User | created_at | group_id |
 | CALLS_TOOL | ProcessStep → Tool | timeout, interactionMode | toolId |
 | CALLS_PROCESS | ProcessStep → Process | timeout | processId |
 | DEPENDS_ON | ProcessStep → ProcessStep | order | dependsOn |
-| FOR_ENTITY | MetricValue → Service/Tool/Process/Conversation | dimensions | entityId |
-| OF_METRIC | MetricValue → MetricDefinition | none | metricId |
 
 ## Architectural Decisions
-1. Graphiti SCOPED_TO dual-write.
-2. Alternatives as nodes.
-3. Secrets via vault edge.
-4. WorkingMemory computed.
-5. Dual-write during migration.
+1. Alternatives as nodes.
+2. Secrets via vault edge.
+3. WorkingMemory computed.
+4. Dual-write during migration (group_id remains property-level for Graphiti).
 
 ## Edits for 02-archtecture.md
 - [ ] ### Edit 3.1: Episode Binding Lifecycle
-  - Describe event-driven pattern: Graphiti async creation, subscribe to episode created, then create BOUND_TO_EPISODE + SCOPED_TO edges; no name-based polling.
+  - Describe event-driven pattern: Graphiti async creation, subscribe to episode created, then create HAS_CONTENT edge; no name-based polling.
 - [ ] ### Edit 3.2: Alternative Cascade Algorithm
   - Rewrite cascade to traverse RESPONDS_TO edges and HAS_ALTERNATIVE, not embedded arrays.
 - [ ] ### Edit 3.3: Context Assembly (WorkingMemory)
-  - Clarify WorkingMemory is computed via graph traversals (HAS_TURN→HAS_ALTERNATIVE active path, HAS_SUMMARY, HAS_ACTIVE_ENTITY, BOUND_TO_EPISODE); no WorkingMemory edges.
+  - Clarify WorkingMemory is computed via graph traversals (HAS_TURN→HAS_ALTERNATIVE active path, HAS_SUMMARY, HAS_ACTIVE_ENTITY, HAS_CONTENT); no WorkingMemory edges.
 - [ ] ### Edit 3.4: Compression & Summarization
   - Use HAS_SUMMARY, SUMMARIZES, HAS_CONTENT, COVERS_UP_TO, CREATED_BY_PROCESS edges for lineage.
 
 ## Validation Checklist
-- [ ] Episode binding flow shows async edge creation, dual-write group_id + SCOPED_TO.
+- [ ] Episode binding flow shows async HAS_CONTENT edge creation.
 - [ ] Cascade algorithm references RESPONDS_TO/HAS_ALTERNATIVE edges.
 - [ ] WorkingMemory described as computed traversal only.
 - [ ] Compression lineage uses edge terms consistently.

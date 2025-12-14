@@ -13,22 +13,21 @@
 **Current State:**
 - Properties: `ownerId` on Service/Tool/Process/ServiceTemplate/ToolTemplate; `userId` on Secret/Conversation; `group_id` on Episode/Entity for scoping.
 **Proposed Change:**
-- Remove ownership/scoping properties; add edges: `(Resource)-[:OWNED_BY]->(User)` and `(Episode|Entity)-[:SCOPED_TO]->(Conversation|User)`.
-- Edge properties: `created_at` (optionally on edge), `shared` can remain node property.
+- Remove ownership properties; add edges: `(Resource)-[:OWNED_BY]->(User)`. Keep `group_id` as a property for Graphiti scoping.
+- Edge properties: `created_at` (optionally on edge); `shared` can remain node property.
 **Impact:**
 - API schemas drop `ownerId`/`userId` outputs; sharing/visibility checks become graph traversals.
-- Business rules BR-SHARE/BR-SEC align to edge existence instead of property equality.
+- Business rules BR-SHARE/BR-SEC align to edge existence instead of property equality; `group_id` remains property-based.
 - Queries shift to `MATCH (r)-[:OWNED_BY]->(u {id:$user})`.
-**Migration Notes:** Backfill edges from stored properties; maintain `shared` property for discovery filters.
+**Migration Notes:** Backfill OWNED_BY edges from stored properties; maintain `shared` property and `group_id` for discovery filters.
 
 #### Finding 2: Template provenance (`serviceTemplateId`/`toolTemplateId`)
 **Current State:**
 - Properties: `serviceTemplateId`, `toolTemplateId` soft references on instances.
 **Proposed Change:**
-- Add edges: `(Service)-[:INSTANTIATED_FROM {at: timestamp}]->(ServiceTemplate)`, `(Tool)-[:INSTANTIATED_FROM]->(ToolTemplate)`.
-- Keep provenance even if template archived.
-**Impact:** Event payloads and APIs carry template edge creation instead of storing UUIDs; BR-TEMPLATE references check edge presence.
-**Migration Notes:** Create edges from existing IDs; preserve archived template info as edge property or node flag.
+- Out of scope — templates are documentation aids only; no template edges or entities in the system.
+**Impact:** No edge changes; properties may remain for provenance until templates are formally retired from docs.
+**Migration Notes:** Remove template edge references from the plan.
 
 #### Finding 3: Tool dependency chain (`serviceId`, `secretId`)
 **Current State:**
@@ -59,7 +58,7 @@
 **Current State:**
 - Turn has `conversationId` and `parentTurnId` properties; Alternative has `inputContext.parentAlternativeId`, `processId`, `episodeId` properties.
 **Proposed Change:**
-- Model Alternatives as nodes: `(Turn)-[:HAS_ALTERNATIVE]->(Alternative)`; `(Alternative)-[:BELONGS_TO]->(Turn)`; `(Turn)-[:CHILD_OF {viaAlternative}]->(Turn)`; `(Alternative)-[:RESPONDS_TO]->(Alternative)` (parent alt); `(Alternative)-[:EXECUTED_BY]->(Process)`; `(Alternative)-[:BOUND_TO_EPISODE]->(Episode)`.
+- Model Alternatives as nodes: `(Turn)-[:HAS_ALTERNATIVE]->(Alternative)`; `(Turn)-[:CHILD_OF {viaAlternative}]->(Turn)`; `(Alternative)-[:RESPONDS_TO]->(Alternative)` (parent alt); `(Alternative)-[:EXECUTED_BY]->(Process)`; `(Alternative|Summary|Introspection)-[:HAS_CONTENT]->(Episode)`.
 **Impact:** BR-ALT cascade becomes relationship traversal; Episode binding ceases to be string backfill; cache validity derived by comparing edges.
 **Migration Notes:** Requires schema shift (alternative nodes); backfill from existing arrays; keep `isActive` as property or edge state.
 
@@ -67,23 +66,23 @@
 **Current State:**
 - Graphiti Episodes store `group_id` = conversationId; treated as property pointer.
 **Proposed Change:**
-- Edge: `(Episode)-[:SCOPED_TO]->(Conversation)` (or User). Maintain `group_id` only if Graphiti requires.
-**Impact:** Semantic search and context assembly can traverse scope edges; dedup honors graph scope.
-**Migration Notes:** Coordinate with Graphiti core; may need dual-write property + edge for compatibility.
+- No action — `group_id` remains a property for scoping.
+**Impact:** Semantic search and dedup stay property-based; no new edges added.
+**Migration Notes:** Remove SCOPED_TO edge references from the plan.
 
 #### Finding 8: WorkingMemory references (`conversationId`, `currentTurnId`, `currentAlternativeId`, `immediatePath[]`, `summaries`, `activeEntities`, `introspectionContext`)
 **Current State:**
 - WorkingMemory stores multiple ID arrays.
 **Proposed Change:**
-- Edges: `(WorkingMemory)-[:FOR_CONVERSATION]->(Conversation)`; `(WorkingMemory)-[:FOCUSED_AT]->(Alternative)`; `(WorkingMemory)-[:IMMEDIATE_PATH {order}]->(Alternative)`; `(WorkingMemory)-[:USES_SUMMARY]->(Summary)`; `(WorkingMemory)-[:INCLUDES_ENTITY]->(Entity)`; `(WorkingMemory)-[:INCLUDES_INTROSPECTION]->(Episode)`.
-**Impact:** Token accounting and path rebuilds become graph traversals; BR-MEMORY-* reference edge cardinality.
-**Migration Notes:** WorkingMemory may remain computed/cache node; ensure edges rebuilt on updates.
+- Retired — WorkingMemory remains ephemeral computed state; no edges added.
+**Impact:** Token accounting and path rebuilds remain computed from the active path; no graph storage.
+**Migration Notes:** Clarify computed-only stance in docs.
 
 #### Finding 9: Entity provenance (`group_id`, `sources[].created_by/episode_id`, `enriched_by`)
 **Current State:**
 - Properties: `group_id`, `sources` embedded with `created_by`, `episode_id`, `original_name`, `confidence`; `enriched_by` processId.
 **Proposed Change:**
-- Edges: `(Entity)-[:MENTIONED_IN {sourceType,confidence,original_name}]->(Episode)`; `(Entity)-[:CREATED_BY]->(User)`; `(Entity)-[:ENRICHED_BY {at}]->(Process)`; `(Entity)-[:SCOPED_TO]->(Conversation|User)`.
+- Edges: `(Entity)-[:MENTIONED_IN {sourceType,confidence,original_name}]->(Episode)`; `(Entity)-[:CREATED_BY]->(User)`; `(Entity)-[:ENRICHED_BY {at}]->(Process)`; scoping remains property-based via `group_id`.
 **Impact:** Dedup and enrichment use edges; BR-ENTITY-* enforced via graph.
 **Migration Notes:** Map existing `sources` array to multiple edges; keep facet/enrichment data as properties.
 
@@ -91,22 +90,22 @@
 **Current State:**
 - Properties link Summary to Conversation, source Episodes, content Episode, prior Turn, creating Process; Introspection holds Episode pointer.
 **Proposed Change:**
-- Edges: `(Conversation)-[:HAS_SUMMARY]->(Summary)`; `(Summary)-[:HAS_CONTENT]->(Episode)`; `(Summary)-[:SUMMARIZES]->(Episode)` (multiple, ordered) with `compressionLevel`; `(Summary)-[:CREATED_BY]->(Process)`; `(Summary)-[:COVERS_UP_TO]->(Turn)`; `(Introspection)-[:HAS_CONTENT]->(Episode)`; `(Introspection)-[:SCOPED_TO]->(User|Conversation)`.
-**Impact:** Compression lineage and introspection carousel become traversable; BR-SUMMARY-* validations rely on relationships.
+- Edges: `(Conversation)-[:HAS_SUMMARY]->(Summary)`; `(Summary|Alternative|Introspection)-[:HAS_CONTENT]->(Episode)`; `(Summary)-[:SUMMARIZES]->(Episode)` (multiple, ordered) with `compressionLevel`; `(Summary)-[:CREATED_BY]->(Process)`; `(Summary)-[:COVERS_UP_TO]->(Turn)`.
+**Impact:** Compression lineage and introspection carousel become traversable; BR-SUMMARY-* validations rely on relationships; scoping remains via `group_id` property.
 **Migration Notes:** Backfill edges from arrays; keep `compressionLevel` as property.
 
 #### Finding 11: Metrics pointers (`metricId`, `entityId`, `dimensions.userId/conversationId`)
 **Current State:**
 - MetricValue stores `metricId` and `entityId` strings plus dimensions map.
 **Proposed Change:**
-- Edges: `(MetricValue)-[:OF_METRIC]->(MetricDefinition)`; `(MetricValue)-[:FOR_ENTITY]->(Service|Tool|Process|Conversation)`; optional `(MetricValue)-[:FOR_USER]->(User)` for scoped attribution.
-**Impact:** Analytics queries become graph traversals; retention rules target edges.
-**Migration Notes:** Could keep dimensions as properties for ad-hoc filtering; edges add semantic clarity.
+- Deferred — metrics remain property-based in this migration; keep meta-design for future.
+**Impact:** No edge changes in this phase.
+**Migration Notes:** Remove metric edge references from current plan.
 
 ### 01-business_rules.md
 #### Finding 1: Sharing/ownership checks via properties (`ownerId`, `shared`)
 **Current State:** Rules compare `ownerId`/`shared` properties to authorize usage across Service/Tool/Secret/Process/Conversation.
-**Proposed Change:** Move to edges `[:OWNED_BY]` and `[:VISIBILITY {shared:true}]` or derive sharing from a `[:SHARED_WITH]->(User|Group)` edge.
+**Proposed Change:** Move to edges `[:OWNED_BY]` and `[:VISIBILITY {shared:true}]` or derive sharing from a `[:SHARED_WITH]->(User|Group)` edge; keep `group_id` property for Graphiti.
 **Impact:** BR-SHARE-* validations become graph queries; conflict detection uses edge presence.
 **Migration Notes:** Introduce visibility edges; keep `shared` boolean as cached flag if needed.
 
@@ -124,20 +123,20 @@
 
 #### Finding 4: WorkingMemory and token budgets referencing IDs
 **Current State:** BR-MEMORY-* uses arrays of IDs to validate path and scope.
-**Proposed Change:** Validate via edges linking WorkingMemory to alternatives/summaries/entities.
-**Impact:** Budget checks and cross-conversation guards use graph structure.
-**Migration Notes:** Recompute edges whenever WorkingMemory updates.
+**Proposed Change:** Keep WorkingMemory computed from active path; no edges added.
+**Impact:** Budget checks and cross-conversation guards remain computed logic; ensure narrative explains derived state.
+**Migration Notes:** Clarify computed-only stance in BRs.
 
 ### 02-archtecture.md
-#### Finding 1: Template and dependency references (`templateId`, `serviceId`, `toolId`, `conversationId`)
+#### Finding 1: Dependency references (`serviceId`, `toolId`, `conversationId`)
 **Current State:** Event flows and validation discuss IDs, not edges.
-**Proposed Change:** Workers create/validate edges (`INSTANTIATED_FROM`, `USES_SERVICE`, `HAS_TURN`).
+**Proposed Change:** Workers create/validate edges (`USES_SERVICE`, `HAS_TURN`, etc.); templates remain documentation-only.
 **Impact:** Health checks and dependency validation traverse edges rather than comparing ids.
-**Migration Notes:** Update worker inputs to reference nodes or edge creation instructions.
+**Migration Notes:** Update worker inputs to reference nodes or edge creation instructions (no template edges).
 
 #### Finding 2: Context assembly uses `group_id`, `activeEntities` arrays
 **Current State:** Context builder collects IDs from properties.
-**Proposed Change:** Traverse `(Conversation)-[:HAS_TURN]->(Turn)-[:HAS_ALTERNATIVE]->(Alternative)-[:BOUND_TO_EPISODE]->(Episode)` and `(Conversation)-[:HAS_ACTIVE_ENTITY]->(Entity)` to build context.
+**Proposed Change:** Traverse `(Conversation)-[:HAS_TURN]->(Turn)-[:HAS_ALTERNATIVE]->(Alternative)-[:HAS_CONTENT]->(Episode)` and `(Conversation)-[:HAS_ACTIVE_ENTITY]->(Entity)` to build context.
 **Impact:** Reduces duplication and stale caches; enables richer graph queries.
 **Migration Notes:** Requires entity edges and alternative nodes.
 
@@ -157,7 +156,7 @@
 ### 04-async-api.md
 #### Finding 1: Event payloads encode relationships as IDs
 **Current State:** Messages like `ToolCreationRequested` carry `serviceId`, `toolTemplateId`, `secretId`.
-**Proposed Change:** Events should describe edge creations (`usesService`, `usesSecret`, `instantiatedFromTemplate`) instead of raw IDs.
+**Proposed Change:** Events should describe edge creations (`usesService`, `usesSecret`) instead of raw IDs; templates remain documentation-only.
 **Impact:** Downstream workers form edges directly; failure events reference relationship types.
 **Migration Notes:** Version AsyncAPI schemas; keep IDs temporarily for compatibility.
 
@@ -169,7 +168,7 @@
 
 #### Finding 3: Context compression/introspection events carry `conversationId`, `sourceEpisodeIds`
 **Current State:** Provenance embedded as arrays.
-**Proposed Change:** Events should trigger edges `(Summary)-[:SUMMARIZES]->(Episode)` and `(Introspection)-[:SCOPED_TO]->(User|Conversation)`.
+**Proposed Change:** Events should trigger edges `(Summary)-[:SUMMARIZES]->(Episode)` and reuse HAS_CONTENT for content linkage; scoping remains property-based.
 **Impact:** Lineage tracking becomes first-class graph structure.
 **Migration Notes:** Align with Summary/Introspection schema changes.
 
@@ -188,21 +187,20 @@
 
 #### Finding 3: Summary/Introspection schemas use ID properties for provenance
 **Current State:** `episodeId`, `sourceEpisodeIds`, `priorTurnId`, `createdBy` in Summary; `episodeId`, `position` in Introspection.
-**Proposed Change:** Use edges `HAS_CONTENT`, `SUMMARIZES`, `COVERS_UP_TO`, `CREATED_BY_PROCESS`, `SCOPED_TO`.
+**Proposed Change:** Use edges `HAS_CONTENT`, `SUMMARIZES`, `COVERS_UP_TO`, `CREATED_BY_PROCESS`; scoping remains via `group_id` property.
 **Impact:** Compression lineage and carousel positioning become relational data.
 **Migration Notes:** Add relationship payloads; keep position as property.
 
 #### Finding 4: Metrics schemas (`metricId`, `entityId`, `dimensions.userId/conversationId`)
 **Current State:** IDs in MetricValue.
-**Proposed Change:** Edge-based associations for metric attribution; dimensions become edge properties or remain as tags.
-**Impact:** Enables graph analytics on metrics.
-**Migration Notes:** Provide dual representation during transition.
+**Proposed Change:** Deferred — metrics stay property-based in this migration.
+**Impact:** No edge changes in this phase.
+**Migration Notes:** Keep meta-design for future version.
 
 ## Summary of Proposed Edge Types
 | Edge Type | From | To | Properties | Replaces Property |
 |-----------|------|----|------------|-------------------|
-| OWNED_BY | Service/Tool/Process/Template/Secret/Conversation | User | created_at | ownerId/userId |
-| INSTANTIATED_FROM | Service/Tool | ServiceTemplate/ToolTemplate | at | serviceTemplateId/toolTemplateId |
+| OWNED_BY | Service/Tool/Process/Secret/Conversation | User | created_at | ownerId/userId |
 | USES_SERVICE | Tool | Service | connectionParams sans secrets | serviceId |
 | USES_SECRET | Tool | Secret | scope metadata | connectionParams.secretId |
 | DEFAULT_PROCESS | Conversation | Process | since | processId (hint) |
@@ -212,25 +210,24 @@
 | HAS_ALTERNATIVE | Turn | Alternative | isActive | embedded alternatives |
 | RESPONDS_TO | Alternative | Alternative | none | inputContext.parentAlternativeId |
 | EXECUTED_BY | Alternative | Process | createdAt | alternative.processId |
-| BOUND_TO_EPISODE | Alternative/Summary/Introspection | Episode | source, createdAt | episodeId |
+| HAS_CONTENT | Alternative/Summary/Introspection | Episode | source, createdAt | episodeId |
 | SUMMARIZES | Summary | Episode | order | sourceEpisodeIds |
-| HAS_ACTIVE_ENTITY | Conversation/WorkingMemory | Entity | addedAt, relevance | activeEntities |
-| SCOPED_TO | Episode/Entity | Conversation/User | none | group_id |
-| CALLS_TOOL/CALLS_PROCESS | ProcessStep | Tool/Process | timeout, interactionMode | toolId/processId |
+| HAS_SUMMARY | Conversation | Summary | none | conversationId |
+| COVERS_UP_TO | Summary | Turn | none | priorTurnId |
+| CREATED_BY_PROCESS | Summary | Process | none | createdBy |
+| HAS_ACTIVE_ENTITY | Conversation | Entity | addedAt, relevance | activeEntities |
+| CALLS_TOOL | ProcessStep | Tool | timeout, interactionMode | toolId |
+| CALLS_PROCESS | ProcessStep | Process | timeout | processId |
 | DEPENDS_ON | ProcessStep | ProcessStep | order | dependsOn |
-| FOR_ENTITY | MetricValue | Service/Tool/Process/Conversation | dimensions | entityId |
-| OF_METRIC | MetricValue | MetricDefinition | none | metricId |
 
 ## Questions & Concerns
 ### Architectural Questions
-1. Do we control Graphiti core enough to add `SCOPED_TO` edges for Episodes/Entities, or do we need dual-write of `group_id` + edges?
-2. Should Alternatives become first-class nodes, or do we keep embedded documents and mirror edges in a separate projection?
-3. How should secrets be modeled safely as edges without leaking credentials—edge with opaque secret ref plus off-graph vault?
+1. Should Alternatives become first-class nodes, or do we keep embedded documents and mirror edges in a separate projection?
+2. How should secrets be modeled safely as edges without leaking credentials—edge with opaque secret ref plus off-graph vault?
 
 ### Performance Considerations
-- Relationship-heavy model needs relationship indexes on `OWNED_BY`, `USES_SERVICE`, `CHILD_OF`, `RESPONDS_TO`, `BOUND_TO_EPISODE`.
+- Relationship-heavy model needs relationship indexes on `OWNED_BY`, `USES_SERVICE`, `CHILD_OF`, `RESPONDS_TO`, `HAS_CONTENT`.
 - WorkingMemory rebuilds via traversals may outperform array manipulation but need caching for deep trees.
-- MetricValue high-volume writes may justify keeping dimension properties as tags even if edges exist.
 
 ### Backward Compatibility
 - May require API vNext or translation layer: accept IDs, immediately create edges, and phase out properties.
@@ -238,18 +235,18 @@
 - Event schemas need versioning; consumers must understand both ID and edge-intent payloads during rollout.
 
 ## Confidence Levels
-**High Confidence:** Ownership edges; Tool→Service/Secret; Conversation/Turn/Alternative/Episode edges; Template provenance; Summary lineage; ProcessStep dependencies.
+**High Confidence:** Ownership edges; Tool→Service/Secret; Conversation/Turn/Alternative/Episode edges; Summary lineage; ProcessStep dependencies.
 
-**Medium Confidence:** Episode/Entity `group_id` replacement; WorkingMemory path edges; activeEntities edges; DEFAULT_PROCESS hint edge.
+**Medium Confidence:** ActiveEntities edges; DEFAULT_PROCESS hint edge.
 
-**Low Confidence:** MetricValue dimension edges; Worker currentJob edges (operational detail may remain properties).
+**Low Confidence:** Worker currentJob edges (operational detail may remain properties).
 
 ## Recommended Implementation Order
 1. Phase 1: Ownership/provenance edges; Tool dependency edges; Conversation↔Turn↔Alternative↔Episode edges (core graph integrity).
 2. Phase 2: Summary/introspection lineage edges; ProcessStep dependency edges; DEFAULT_PROCESS and FORKED_FROM edges; active entity edges.
-3. Phase 3: WorkingMemory path edges; Graphiti `group_id` dual-write; MetricValue attribution edges; event/OpenAPI schema updates.
+3. Phase 3: Event/OpenAPI schema updates and compatibility shims (WorkingMemory remains computed).
 
 ## Next Steps
-- Decide on Alternative node promotion and Graphiti dual-write strategy.
+- Decide on Alternative node promotion.
 - Draft migration plan (backfill edges, API compatibility layer).
 - Update OpenAPI/AsyncAPI to express relationships as edge creations; adjust workers to enforce via graph traversals.

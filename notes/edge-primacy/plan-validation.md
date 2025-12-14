@@ -1,71 +1,51 @@
 ## Coherence Assessment: Edge-Primacy Migration Plan
 
 ### Plan Internal Coherence
-**Phase 1**: issues found  
-- Edge table introduces both `BOUND_TO_EPISODE` and `HAS_CONTENT` for Summary/Introspection → Episode without a clear split; Edit 1.8 only uses `HAS_CONTENT`, creating an internal collision.  
-- Edit 1.3 targets Process template provenance even though Processes have no template reference and the edge table only allows `INSTANTIATED_FROM` for Service/Tool.  
-- WorkingMemory is described as computed (no edges) while the initial audit suggested edges; the phase does not reconcile this change in stance.
+**Phase 1**: coherent  
+- Edge table aligns to 19-edge set; WorkingMemory marked computed-only; HAS_CONTENT-only binding; timing table present (HAS_CONTENT/SUMMARIZES async).
 
-**Phase 2**: issues found  
-- Template BRs (immutability/instantiation) are not mentioned despite `INSTANTIATED_FROM` being in the edge table, leaving template rules property-based.  
-- Alternative cascade edits reference `RESPONDS_TO`, but BR-ALT cache-status logic still depends on `isActive` semantics from arrays; the phase does not spell out how to derive it from edges.
+**Phase 2**: minor note  
+- BR-ALT still implies `isActive` array semantics; consider a sentence on deriving cache status via RESPONDS_TO + active flag, but otherwise edge references align.
 
-**Phase 3**: issues found  
-- Episode binding flow assumes an `EpisodeCreated` event but does not note whether `SCOPED_TO` targets Conversation vs User; ambiguity remains from Phase 1.  
-- Cascade rewrite relies on `RESPONDS_TO` but keeps `HAS_ALTERNATIVE` sequences as edge properties; ordering semantics are not specified.
+**Phase 3**: coherent  
+- Episode binding uses HAS_CONTENT async; WorkingMemory traversal references HAS_CONTENT; cascade references RESPONDS_TO/HAS_ALTERNATIVE.
 
 **Phase 4**: coherent  
-- Single edit aligns classification to edge-creation mutations; no internal contradictions detected.
+- Classification matches edge-creation mutations; no contradictions.
 
-**Phase 5**: issues found  
-- Edge table still contains the Summary/Introspection dual-edge conflict (`BOUND_TO_EPISODE` vs `HAS_CONTENT`).  
-- New `AlternativeCreated` event is proposed, but the plan does not reconcile existing `alternative.creation.requested/created` events in the current AsyncAPI (potential duplication).  
-- Compression event edit mentions edge intents but omits whether `SCOPED_TO` is emitted for summary Episodes.
+**Phase 5**: coherent  
+- Alternative events extend existing alternative.* channels with edge intents (no duplication); HAS_CONTENT-only binding noted.
 
-**Phase 6**: issues found  
-- Relationship endpoints (Edit 6.6) are introduced without counterparts in earlier phases or current docs; unclear whether these are new endpoints or just documentation views.  
-- POST endpoint notes (Edit 6.7) rely on knowing which edges are synchronous vs asynchronous, but prior phases only defined this for Episodes; other edges’ timing is unspecified.  
-- Metric edges (`FOR_ENTITY`, `OF_METRIC`) appear in the edge table yet no OpenAPI edits cover Metric schemas.
+**Phase 6**: minor note  
+- Relationship endpoints called out; acceptable as doc-first addition but ensure API surface matches future implementation.
 
 ### Cross-Phase Coherence
-**Edge Type Consistency**: inconsistencies found  
-- `SCOPED_TO` target alternates between Conversation and User; current docs use `group_id = userId`, while Phase 1 tables allow both without choosing.  
-- Summary/Introspection edges conflict: some phases expect `HAS_CONTENT`, others also keep `BOUND_TO_EPISODE`.  
-- Template provenance edges defined, but only Phase 1 mentions Process templating (not supported elsewhere) and later phases ignore template BRs.
+**Edge Type Consistency**: consistent  
+- All phases use the 19-edge set (HAS_CONTENT binding; no templates/metrics/SCOPED_TO).
 
-**Dependency Chain**: issues found  
-- Phase 5 assumes an `EpisodeCreated` event emitting edge intents that Phase 3/4 do not define; ordering of edge creation vs event emission is underspecified.  
-- Phase 6’s new relationship endpoints depend on edge definitions, but earlier phases do not specify how those edges are exposed or versioned.
+**Dependency Chain**: valid  
+- Phases build sequentially; async binding relies on HAS_CONTENT after Graphiti ingestion as noted in Phase 3/5.
 
-**Coverage Gaps**: gaps found  
-- Metric edges are listed in every edge table but are never addressed in edits (BRs, architecture, AsyncAPI, or OpenAPI).  
-- Template edge treatment stops at Phase 1; Business Rules and API/Event specs remain pointer-based for templates.  
-- Dual-write strategy is called out, but there is no phase covering how/when properties are actually deprecated or removed.
+**Coverage Gaps**: minor  
+- Dual-write/deprecation timing (e.g., group_id, legacy id fields) is not scheduled; add a cleanup note if needed.
 
 ### Expected Documentation Coherence (Post-Migration)
-**Entity Model ↔ Business Rules**: misaligned  
-- Ownership/scoping edge model conflicts with BRs that remain property-centric for templates and metrics; ambiguous `SCOPED_TO` target could leave BR-EPISODE-002/BR-ENTITY-008 inconsistent with the model.
+**Entity Model ↔ Business Rules**: aligned with minor note  
+- Ownership via edges; scoping remains property-only (group_id). Ensure BR-ALT cache-status wording references RESPONDS_TO + active flag.
 
-**REST API ↔ Event Schemas**: misaligned  
-- AsyncAPI introduces edge-intent events (Phase 5) without reconciling existing event names/schemas; OpenAPI (Phase 6) adds relationship endpoints not covered by AsyncAPI.  
-- Episode binding edges are async, but REST schemas for alternatives/summaries/introspections still lack clarity on when `BOUND_TO_EPISODE` vs `HAS_CONTENT` is available.
+**REST API ↔ Event Schemas**: mostly aligned  
+- Alternative event shape resolved (extend existing channels). HAS_CONTENT async binding is noted; ensure OpenAPI response notes when binding is available.
 
-**Architecture ↔ Implementation Specs**: misaligned  
-- Architecture (Phase 3) assumes edge-based cascade and binding, but OpenAPI edits (Phase 6) still rely on deprecating properties rather than defining relationship payloads; WorkingMemory is described as computed but earlier audit suggests edges, leaving context assembly story muddled.
+**Architecture ↔ Implementation Specs**: aligned with minor follow-up  
+- Architecture’s edge-based cascade/binding matches AsyncAPI; OpenAPI still needs explicit relationship payloads and timing notes (sync vs async) per edge.
 
 ### Critical Issues (Must Resolve Before Execution)
-1. Summary/Introspection → Episode edge conflict (`BOUND_TO_EPISODE` vs `HAS_CONTENT`): choose a single edge or define distinct semantics; ensure all phases align.  
-2. `SCOPED_TO` target ambiguity (Conversation vs User) vs existing `group_id = userId` invariant; decide the canonical target and dual-write rules.  
-3. Template provenance scope: remove Process template references or extend edge/table support and update BR-TEMPLATE/OpenAPI/AsyncAPI accordingly.  
-4. Metrics: either drop `FOR_ENTITY`/`OF_METRIC` from the edge set or add edits in BRs/architecture/OpenAPI/AsyncAPI to cover them.  
-5. Event duplication: Phase 5’s `AlternativeCreated` event must be reconciled with existing AsyncAPI channels to avoid two event shapes for the same action.
+None blocking. Optional tighten-ups: clarify BR-ALT cache derivation via edges; document relationship endpoint availability/timing in Phase 6; add a deprecation/cleanup step for legacy properties.
 
 ### Recommendations
-1. Lock an authoritative edge glossary (targets + semantics) before editing—resolve SCOPED_TO and Summary/Introspection edges, and strip unused edges (metrics/template/process).  
-2. Add a mini-phase or appendix covering metrics and template edges (BRs + API/Event schemas) or explicitly defer/removal to avoid half-migrated concepts.  
-3. Define edge creation timing (sync vs async) per edge type and propagate to Phase 5/6 so POST and events stay in sync.  
-4. Clarify WorkingMemory stance (computed only vs persisted edges) and reflect it in Phase 1/3 narratives and in OpenAPI/AsyncAPI responses.  
-5. Consolidate alternative events (reuse existing channels with new payloads) to prevent schema divergence.
+1. Keep the 19-edge glossary handy in each phase; ensure OpenAPI responses note when HAS_CONTENT bindings appear (post-async).  
+2. Add a short note on deprecating legacy id properties once edges are live (esp. group_id dual-write stance).  
+3. Add one line in Phase 2 to tie BR-ALT cache status to RESPONDS_TO + active flag if further clarity is needed.
 
 ### Overall Assessment
-Needs revision — core edge semantics (scoping, content binding, template/metric coverage, and event alignment) are unsettled; proceeding would propagate inconsistencies across all six docs.
+Ready to execute — core edge set and scoping decisions are aligned; only minor clarifications remain optional.
