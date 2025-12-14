@@ -1,4 +1,4 @@
-# Edge Migration Audit Report
+# Edge Migration Audit Report (prior to phased update)
 
 ## Executive Summary
 - Found pervasive property-as-pointer usage across all six docs; highest density in `00-foundation.md` and `05-openapi.md`.
