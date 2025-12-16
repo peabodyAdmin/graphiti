@@ -24,11 +24,11 @@
 
 | Endpoint | Method | Type | Status | Rationale |
 |----------|--------|------|--------|-----------|
-| `/api/v1/secrets` | GET | Sync | 200 | Owner-scoped metadata read (filters by userId) |
-| `/api/v1/secrets/{id}` | GET | Sync | 200/404 | Owner-only metadata (non-owner → 404) |
-| `/api/v1/secrets` | POST | **Async** | 202 | Create encrypted secret (userId from auth; event published) |
-| `/api/v1/secrets/{id}` | PUT | **Async** | 202 | Rotate encrypted value (owner-only; event published) |
-| `/api/v1/secrets/{id}` | DELETE | **Async** | 202 | Delete secret (owner-only; event published) |
+| `/api/v1/secrets` | GET | Sync | 200 | Owner-scoped metadata read (filters by `OWNED_BY` edge) |
+| `/api/v1/secrets/{id}` | GET | Sync | 200/404 | Owner-only metadata via `OWNED_BY` (non-owner → 404) |
+| `/api/v1/secrets` | POST | **Async** | 202 | Create encrypted secret (establishes `OWNED_BY` edge from auth context; event published) |
+| `/api/v1/secrets/{id}` | PUT | **Async** | 202 | Rotate encrypted value (`OWNED_BY` validation; event published) |
+| `/api/v1/secrets/{id}` | DELETE | **Async** | 202 | Delete secret (`OWNED_BY` validation; event published) |
 
 ---
 
@@ -66,8 +66,8 @@
 | `/api/v1/conversations/{id}` | GET | Sync | 200/404 | Read query |
 | `/api/v1/conversations/{id}/tree` | GET | Sync | 200/404 | Read tree structure |
 | `/api/v1/conversations` | POST | **Async** | 202 | Create mutation |
-| `/api/v1/conversations/{id}` | PUT | Sync | 200 | Update metadata only (title, processId hint) |
-| `/api/v1/conversations/{id}/turns` | POST | **Async** | 202 | Create Turn (Episode creation) |
+| `/api/v1/conversations/{id}` | PUT | Sync | 200 | Update metadata only (title, `DEFAULT_PROCESS` edge) |
+| `/api/v1/conversations/{id}/turns` | POST | **Async** | 202 | Create Turn (async `HAS_CONTENT` edge to Episode) |
 | `/api/v1/conversations/{id}/turns/{turnId}/fork` | POST | **Async** | 202 | Fork workflow |
 
 ---
@@ -77,7 +77,7 @@
 | Endpoint | Method | Type | Status | Rationale |
 |----------|--------|------|--------|-----------|
 | `/api/v1/conversations/{id}/turns/{turnId}` | GET | Sync | 200/404 | Read query |
-| `/api/v1/conversations/{id}/turns/{turnId}/alternatives` | POST | **Async** | 202 | Create alternative (Episode + possible execution) |
+| `/api/v1/conversations/{id}/turns/{turnId}/alternatives` | POST | **Async** | 202 | Create alternative (async `HAS_CONTENT` edge + `EXECUTED_BY` edge if agent) |
 | `/api/v1/conversations/{id}/turns/{turnId}/alternatives/{altId}/activate` | PUT | Sync | 200 | UI selection (metadata only, fast) |
 | `/api/v1/conversations/{id}/turns/{turnId}/alternatives/{altId}/regenerate` | POST | **Async** | 202 | Regenerate response (Process execution) |
 
@@ -99,7 +99,7 @@
 | `/api/v1/conversations/{id}/summaries` | GET | Sync | 200 | Read summaries for conversation |
 | `/api/v1/conversations/{id}/summaries/{summaryId}` | GET | Sync | 200/404 | Read specific summary |
 | `/api/v1/conversations/{id}/summaries` | POST | **Async** | 202 | Create summary (compression worker) |
-| `/api/v1/conversations/{id}/summaries/{summaryId}` | PUT | **Async** | 202 | Update summary episode binding |
+| `/api/v1/conversations/{id}/summaries/{summaryId}` | PUT | **Async** | 202 | Update summary `HAS_CONTENT` edge binding |
 | `/api/v1/conversations/{id}/summaries/{summaryId}` | DELETE | **Async** | 202 | Delete summary (triggers recompression) |
 
 ---
