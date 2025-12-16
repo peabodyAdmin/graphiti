@@ -1476,6 +1476,7 @@ paths:
       tags: [Conversations]
       summary: Create new Conversation
       operationId: createConversation
+      description: Establishes `OWNED_BY` edge (sync) and optional `DEFAULT_PROCESS` edge
       x-sync: false
       parameters:
         - $ref: '#/components/parameters/IdempotencyKeyHeader'
@@ -1593,6 +1594,8 @@ paths:
       operationId: createTurn
       description: |
         Create new Turn with initial alternative. Creates Episode in Graphiti.
+        Establishes `HAS_TURN` edge, `CHILD_OF` edge (if parent), `HAS_ALTERNATIVE` edge (sync);
+        triggers async `HAS_CONTENT` edge via EpisodeIngestionWorker.
         
         **Business Rules:**
         - BR-TURN-003: Parent Turn validation
@@ -1672,6 +1675,8 @@ paths:
       operationId: forkConversation
       description: |
         Create new Conversation branching from specified Turn.
+        Establishes `FORKED_FROM` edge with origin metadata, copies `HAS_ACTIVE_ENTITY` edges if
+        requested.
         
         **Business Rules:**
         - BR-CONV-003: Fork integrity (parent/origin references)
@@ -1715,6 +1720,8 @@ paths:
       operationId: createAlternative
       description: |
         Create new alternative (user edit or agent regeneration).
+        Establishes `HAS_ALTERNATIVE` edge, `RESPONDS_TO` edge, `EXECUTED_BY` edge (sync);
+        triggers async `HAS_CONTENT` edge.
         
         **Business Rules:**
         - BR-TURN-012: User alternative creation
@@ -1906,6 +1913,8 @@ paths:
       operationId: compressWorkingMemory
       description: |
         Manually trigger compression job for WorkingMemory.
+        Establishes `HAS_SUMMARY`, `SUMMARIZES`, `HAS_CONTENT`, `COVERS_UP_TO`,
+        `CREATED_BY_PROCESS` edges.
         
         **Business Rules:**
         - BR-SUMMARY-003: Compression level calculation
@@ -2941,6 +2950,7 @@ components:
         ownerId:
           type: string
           format: uuid
+          description: Owner identity; `OWNED_BY` edge target (immutable)
           readOnly: true
           x-immutable: true
         name:
@@ -3065,7 +3075,7 @@ components:
         userId:
           type: string
           format: uuid
-          description: Immutable owner set from authenticated context
+          description: Owner identity; `OWNED_BY` edge target (immutable, derived from auth)
           readOnly: true
         name:
           type: string
@@ -3141,6 +3151,7 @@ components:
         ownerId:
           type: string
           format: uuid
+          description: Owner identity; `OWNED_BY` edge target (immutable)
           readOnly: true
           x-immutable: true
         name:
@@ -3148,6 +3159,7 @@ components:
         serviceId:
           type: string
           format: uuid
+          description: Bound Service; `USES_SERVICE` edge target
           x-immutable: true
         connectionParams:
           type: object
@@ -3319,11 +3331,13 @@ components:
           type: string
           format: uuid
           nullable: true
+          description: Target Tool; `CALLS_TOOL` edge target (mode=tool)
           x-business-rule: BR-STEP-007
         processId:
           type: string
           format: uuid
           nullable: true
+          description: Target Process; `CALLS_PROCESS` edge target (mode=subprocess)
           x-business-rule: BR-STEP-007
         inputs:
           type: object
@@ -3356,6 +3370,7 @@ components:
               x-business-rule: BR-STEP-003
             dependsOn:
               type: array
+              description: Prerequisite steps; `DEPENDS_ON` edge targets
               items:
                 type: string
               x-business-rule: BR-PROCESS-002
@@ -3445,13 +3460,14 @@ components:
         userId:
           type: string
           format: uuid
+          description: Owner identity; establishes `OWNED_BY` edge target (immutable)
           readOnly: true
           x-immutable: true
         processId:
           type: string
           format: uuid
           nullable: true
-          description: UI hint for preferred Process
+          description: Process hint; represents `DEFAULT_PROCESS` edge target (nullable)
           x-business-rule: BR-CONV-001
         status:
           $ref: '#/components/schemas/ConversationStatus'
@@ -3460,24 +3476,27 @@ components:
           items:
             type: string
             format: uuid
-          description: Graphiti Entity UUIDs currently relevant
+          description: Entity UUIDs with active `HAS_ACTIVE_ENTITY` edges to this Conversation
           x-business-rule: BR-CONV-004
         parentConversationId:
           type: string
           format: uuid
           nullable: true
+          description: Fork source; `FORKED_FROM` edge target (immutable)
           readOnly: true
           x-immutable: true
         forkOriginTurnId:
           type: string
           format: uuid
           nullable: true
+          description: Fork origin Turn; stored on `FORKED_FROM` edge (immutable)
           readOnly: true
           x-immutable: true
         forkOriginAlternativeId:
           type: string
           format: uuid
           nullable: true
+          description: Fork origin Alternative; stored on `FORKED_FROM` edge (immutable)
           readOnly: true
           x-immutable: true
           x-business-rule: BR-CONV-003
@@ -3525,12 +3544,14 @@ components:
         conversationId:
           type: string
           format: uuid
+          description: Parent Conversation; inverse of `HAS_TURN` edge (immutable)
           readOnly: true
           x-immutable: true
         parentTurnId:
           type: string
           format: uuid
           nullable: true
+          description: Parent Turn in tree; `CHILD_OF` edge target (immutable, nullable)
           readOnly: true
           x-business-rule: BR-TURN-003
         sequence:
@@ -3555,6 +3576,7 @@ components:
           items:
             $ref: '#/components/schemas/Alternative'
           minItems: 1
+          description: Alternatives linked via `HAS_ALTERNATIVE` edges; minimum one required
           x-business-rule: BR-TURN-008
         timestamp:
           type: string
@@ -3575,12 +3597,13 @@ components:
           type: string
           format: uuid
           nullable: true
+          description: Graphiti Episode; `HAS_CONTENT` edge target (nullable until async binding completes)
           x-business-rule: BR-TURN-006
         processId:
           type: string
           format: uuid
           nullable: true
-          description: Process that created this (agent only)
+          description: Executing Process; `EXECUTED_BY` edge target (agent turns only, immutable)
           x-immutable: true
           x-business-rule: BR-TURN-007
         createdAt:
@@ -3597,6 +3620,7 @@ components:
               type: string
               format: uuid
               nullable: true
+              description: Response target; `RESPONDS_TO` edge target (immutable)
               x-immutable: true
               x-business-rule: BR-TURN-009
           required: [parentAlternativeId]
@@ -3787,18 +3811,19 @@ components:
         conversationId:
           type: string
           format: uuid
+          description: Parent Conversation; inverse of `HAS_SUMMARY` edge (immutable)
           x-immutable: true
         episodeId:
           type: string
           format: uuid
-          description: Graphiti Episode UUID containing summary content
+          description: Summary content Episode; `HAS_CONTENT` edge target
         sourceEpisodeIds:
           type: array
           items:
             type: string
             format: uuid
           x-immutable: true
-          description: Episode UUIDs compressed into this Summary (Turn or lower-level Summary Episodes)
+          description: Source Episodes; `SUMMARIZES` edge targets (immutable)
         compressionLevel:
           type: integer
           minimum: 0
@@ -3808,7 +3833,7 @@ components:
           type: string
           format: uuid
           x-immutable: true
-          description: Last Turn included in this summary
+          description: Boundary Turn; `COVERS_UP_TO` edge target (immutable)
         tokenCount:
           type: integer
           minimum: 0
@@ -3819,6 +3844,7 @@ components:
         createdBy:
           type: string
           enum: [worker, admin]
+          description: Attribution; if 'worker', establishes `CREATED_BY_PROCESS` edge
           x-immutable: true
         updatedAt:
           type: string
@@ -3875,10 +3901,12 @@ components:
         userId:
           type: string
           format: uuid
+          description: Owner identity; `OWNED_BY` edge target (immutable)
           x-immutable: true
         episodeId:
           type: string
           format: uuid
+          description: Introspection content Episode; `HAS_CONTENT` edge target
         position:
           type: integer
           minimum: 0
