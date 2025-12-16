@@ -226,18 +226,18 @@ Authorization: Bearer <token>
 
 ### Secret Ownership & Access Control (BR-SECRET-001, BR-SECRET-002A, BR-SECRET-002B, BR-SEC-001)
 
-- `sub` claim becomes `userId` for all Secret creation/rotation/deletion requests; `userId` is immutable and stored on Secrets.
-- All Secret queries and event subscriptions are filtered by `userId`; non-owners receive 404 to avoid leaking existence.
-- Tool execution validates `secretId` belongs to the same `userId` as the Tool and the Conversation using it; cross-user credentials are rejected.
-- System/background processes operate with impersonation context for a specific `userId`; admin access is explicitly audited.
+- `sub` claim becomes Secret `OWNED_BY` target for all creation/rotation/deletion requests; ownership is immutable.
+- All Secret queries and event subscriptions are filtered by `OWNED_BY`; non-owners receive 404 to avoid leaking existence.
+- Tool execution validates the Secret’s `OWNED_BY` target matches the Tool’s `OWNED_BY` target and the Conversation’s `OWNED_BY` target; cross-user credentials are rejected.
+- System/background processes operate with impersonation context for a specific user; admin access is explicitly audited.
 - Secrets are never exposed in plaintext; responses and events only include metadata and user ownership.
 
 ### Visibility & Authorization (Sharing Model)
 
 **Query Pattern (per entity type: ServiceTemplate, ToolTemplate, Service, Tool, Secret):**
-- Return items where `(ownerId == auth.userId) OR (shared == true)`.
-- Filters: `owned=true` → `ownerId == auth.userId`; `shared=true` → `shared == true`.
-- List responses include `ownerId`, `shared`, and owner attribution string for UX (“Alice’s Tool”).
+- Return items where `(OWNED_BY target == auth.userId) OR (shared == true)`.
+- Filters: `owned=true` → `OWNED_BY == auth.userId`; `shared=true` → `shared == true`.
+- List responses include `OWNED_BY` target, `shared`, and owner attribution string for UX (“Alice’s Tool”).
 
 **Permission Matrix**
 | Action | Owner | Non-owner (shared=true) | Non-owner (shared=false) |
@@ -250,9 +250,9 @@ Authorization: Bearer <token>
 | Reference in own resource | ✅ | Allowed if `shared=true` | ❌ (422/404) |
 
 **Cross-User Reference/Execution (BR-SHARE-005/007/006):**
-- Tool.ownerId != Service.ownerId → require `Service.shared=true`; else 422.
-- Service.ownerId must equal Secret.ownerId; Secrets never cross users (reject 403/422).
-- Executor Conversation.userId != Tool.ownerId → require `Tool.shared=true` or reject.
+- Tool `OWNED_BY` target differs from Service `OWNED_BY` target → require `Service.shared=true`; else 422.
+- Service `OWNED_BY` target must equal Secret `OWNED_BY` target; Secrets never cross users (reject 403/422).
+- Executor Conversation `OWNED_BY` target differs from Tool `OWNED_BY` target → require `Tool.shared=true` or reject.
 - Dependencies prevent unsharing/deletion if referenced by other users (409).
 
 **Resource Cost Attribution (BR-SHARE-008):**
@@ -515,10 +515,10 @@ Episode (captured in Graphiti, group_id = userId)
    |                                            Agent Persona Development (per user)
    |
 WorkingMemory Builder (per conversation turn)
-   |- immediateEpisodes (latest Episode UUIDs from active path)
-   |- summaries (cached Summary IDs)
-   |- activeEntities (EntityReference objects)
-   |- introspectionContext (current carousel Introspection Episodes, user-scoped)
+   |- immediateEpisodes: Traverse HAS_TURN → HAS_ALTERNATIVE (isActive=true) → HAS_CONTENT → Episode
+   |- summaries: Traverse HAS_SUMMARY edges from Conversation
+   |- activeEntities: Traverse HAS_ACTIVE_ENTITY edges from Conversation
+   |- introspectionContext: Query Introspection Episodes by user scope (Episode.group_id=user)
    |
    v
 Context Package → Prompt Construction
@@ -534,7 +534,7 @@ Context Package → Prompt Construction
 - **Summary Creation:** When WorkingMemory exceeds token threshold, compression creates Summary Episode; increments compression counter
 - **Introspection Trigger:** After N compressions (default: 5), triggers async introspection process
 - **Introspection Process:** Agent searches user's Episodes, Summaries, Entities, and Introspection history; reflects and creates new Introspection Episode; updates carousel (circular replacement, preserves archives)
-- **WorkingMemory Assembly:** Combines conversation history (immediateEpisodes + summaries), domain knowledge (activeEntities), and agent persona (introspectionContext)
+- **WorkingMemory Assembly:** Computed view combining conversation history (HAS_TURN → HAS_ALTERNATIVE.isActive → HAS_CONTENT Episodes + HAS_SUMMARY Summaries), domain knowledge (HAS_ACTIVE_ENTITY edges), and agent persona (user-scoped Introspection Episodes)
 - **Prompt Construction:** Context package includes all three components: what was said (Episodes/Summaries), what it's about (Entities), and who the agent is (Introspections)
 
 **User-Scoped Knowledge (group_id = userId):**
@@ -576,7 +576,7 @@ Graphiti manages Episodes, Entities, entity extraction, semantic search, and tem
 ### Episode Binding Pattern
 
 **Turn/Alternative Creation (Synchronous + Immediate UI response)**
-1. API validates request and creates ConversationTurn + Alternative with `episodeId = null`
+1. API validates request and creates ConversationTurn + Alternative with no `HAS_CONTENT` edge yet
 2. API persists turn graph and returns `202 Accepted` with `operationId`
 3. API publishes `TurnCreated` (or equivalent) event for downstream workers
 4. User immediately sees their message/response because UI renders from persisted Turn content, not Graphiti
@@ -584,13 +584,13 @@ Graphiti manages Episodes, Entities, entity extraction, semantic search, and tem
 **Episode Backfill (Asynchronous)**
 1. EpisodeIngestionWorker consumes `TurnCreated` event
 2. Worker creates Graphiti Episode named `Turn:{alternativeId}` (contains full content, conversation/group metadata)
-3. Worker updates `Alternative.episodeId` once Graphiti confirms write
-4. Downstream processes (entity extraction, summaries, search) react when `episodeId` transitions from `null → uuid`
+3. Worker establishes `HAS_CONTENT` edge from Alternative to Episode once Graphiti confirms write
+4. Downstream processes (entity extraction, summaries, search) react when `HAS_CONTENT` edge is created (was previously absent)
 
 **Failure Handling:**
 - Worker retries transient Graphiti errors; after max attempts it emits failure event for ops dashboards
 - User operations remain successful; only knowledge-graph enrichment is delayed until Episode creation succeeds
-- Observability dashboards highlight Alternatives still awaiting `episodeId` so support can intervene if backlog forms
+- Observability dashboards highlight Alternatives still awaiting `HAS_CONTENT` edges so support can intervene if backlog forms
 
 ---
 
@@ -602,7 +602,7 @@ Graphiti manages Episodes, Entities, entity extraction, semantic search, and tem
 ┌─────────────────────┐
 │ ConversationTurn    │
 │ - content: string   │ ← UI always reads from here (display layer)
-│ - episodeUUID: ref  │ ← Backfilled by polling worker
+│ - HAS_CONTENT edge  │ ← Backfilled by worker after Graphiti write
 └─────────────────────┘
          │
          │ Fire-and-forget
@@ -621,7 +621,7 @@ Graphiti manages Episodes, Entities, entity extraction, semantic search, and tem
 
 **Intentional Duplication:** Same text stored twice but serves different layers; ensures separation of concerns rather than waste.
 
-**Polling Worker Matching:** Worker correlates Episodes to Turns by searching for `name === "Turn:{turn.uuid}"`, providing deterministic linkage.
+**Polling Worker Matching:** Worker correlates Episodes to Alternatives by searching for `name === "Turn:{alternative.id}"`, providing deterministic linkage, then establishes `HAS_CONTENT` edge.
 
 ---
 
@@ -662,7 +662,7 @@ const results = await graphiti.semanticSearch({
   threshold: 0.7  // similarity threshold
 });
 
-// Returns: Array<{ episodeId, similarity, content }>
+// Returns: Array<{ episode: EpisodeRef, similarity, content }>
 ```
 
 **Caching:** Application may cache search results per conversation for session duration; invalidate on new Episodes
@@ -693,7 +693,7 @@ const results = await graphiti.semanticSearch({
 - Operation events (TurnCreated, ProcessStepRequested, etc.) are emitted atomically with the write
 
 **Eventual Consistency (Asynchronous):**
-- Alternative.episodeId remains `null` until the ingestion worker finishes creating the Graphiti Episode
+- Alternatives may lack `HAS_CONTENT` edges until the ingestion worker finishes creating the Graphiti Episode
 - Episode → Entity extraction: Entities appear in activeEntities after extraction completes
 - Entity → Deduplication: Merged entities eventually replace candidates
 - Enrichment → Entity updates: Enriched summaries/facets eventually available
@@ -748,14 +748,17 @@ const results = await graphiti.semanticSearch({
    - Input: Episode contents from window
    - Output: Compressed summary text (target: 30% of original tokens)
 
-3. Create Summary entity
-   - Summary content stored as new Episode in Graphiti (source='summary')
-   - Summary references source Episode UUIDs
-   - CompressionLevel = max(source Episodes) + 1
+3. Create Summary node with edges
+   - Create `HAS_CONTENT` edge to new Episode in Graphiti (source='summary')
+   - Create `SUMMARIZES` edges to each source Episode (preserve order)
+   - Create `HAS_SUMMARY` edge from Conversation to Summary
+   - Create `COVERS_UP_TO` edge to boundary Turn
+   - Create `CREATED_BY_PROCESS` edge to compression Process
+   - `compressionLevel = max(SUMMARIZES targets) + 1`
 
 4. Update WorkingMemory
-   - Remove compressed Episodes from immediatePath
-   - Add Summary to summaries array
+   - Remove compressed Episodes from immediate path (edge traversal)
+   - Add Summary via `HAS_SUMMARY` inclusion
    - Recompute totalTokens
 
 5. Increment compression counter
@@ -800,7 +803,7 @@ if (totalTokens > process.tokenBudget * 0.8) {
   const compressionJob = {
     conversationId,
     windowStart: oldestUncompressedEpisodeId,
-    windowEnd: episodeId_N_turnsAgo,
+    windowEnd: episodeRef_N_turnsAgo,
     targetCompressionRatio: 0.3
   };
   enqueueCompressionJob(compressionJob);
@@ -901,11 +904,11 @@ Turn 1 (User)  [1 of 1]
 function selectAlternative(turnId, alternativeId) {
   const turn = getTurn(turnId);
 
-  turn.alternatives.forEach(alt => {
-    alt.isActive = (alt.id === alternativeId);
+  getAlternativesViaHasAlternative(turn).forEach(alt => {
+    setHasAlternativeIsActive(turn, alt, alt.id === alternativeId);
   });
 
-  const selectedAlt = turn.alternatives.find(a => a.id === alternativeId);
+  const selectedAlt = getAlternativeViaHasAlternative(turn, alternativeId);
 
   cascadeAncestors(turn, selectedAlt);
   invalidateDescendants(turn);
@@ -917,19 +920,17 @@ function selectAlternative(turnId, alternativeId) {
 ```typescript
 function cascadeAncestors(turn, selectedAlt) {
   let currentTurn = turn;
-  let requiredParentAltId = selectedAlt.inputContext.parentAlternativeId;
+  let requiredParentAlt = getRespondsToTarget(selectedAlt);
 
-  while (currentTurn.parentTurnId && requiredParentAltId) {
-    const parentTurn = getTurn(currentTurn.parentTurnId);
-    parentTurn.alternatives.forEach(alt => {
-      alt.isActive = (alt.id === requiredParentAltId);
+  while (hasChildOfEdge(currentTurn) && requiredParentAlt) {
+    const parentTurn = getParentTurnViaChildOf(currentTurn);
+    getAlternativesViaHasAlternative(parentTurn).forEach(alt => {
+      setHasAlternativeIsActive(parentTurn, alt, alt.id === requiredParentAlt.id);
     });
 
-    const activeParentAlt = parentTurn.alternatives.find(
-      a => a.id === requiredParentAltId
-    );
+    const activeParentAlt = getActiveAlternativeViaHasAlternative(parentTurn);
 
-    requiredParentAltId = activeParentAlt.inputContext.parentAlternativeId;
+    requiredParentAlt = getRespondsToTarget(activeParentAlt);
     currentTurn = parentTurn;
   }
 }
@@ -938,16 +939,14 @@ function cascadeAncestors(turn, selectedAlt) {
 **Phase 3: Descendant Invalidation (Recursive to Leaves)**
 ```typescript
 function invalidateDescendants(turn) {
-  const activeAlt = turn.alternatives.find(a => a.isActive);
+  const activeAlt = getActiveAlternativeViaHasAlternative(turn);
   const children = getChildTurns(turn.id);
 
   children.forEach(child => {
-    child.alternatives.forEach(childAlt => {
-      if (childAlt.inputContext.parentAlternativeId === activeAlt.id) {
-        childAlt.cacheStatus = 'valid';
-      } else {
-        childAlt.cacheStatus = 'stale';
-      }
+    getAlternativesViaHasAlternative(child).forEach(childAlt => {
+      childAlt.cacheStatus = getRespondsToTarget(childAlt)?.id === activeAlt.id
+        ? 'valid'
+        : 'stale';
     });
 
     invalidateDescendants(child);
@@ -969,15 +968,19 @@ User switches Turn 2 to alt-2:
 
 #### WorkingMemory Rebuild
 
-After cascade, WorkingMemory rebuild walks `isActive` alternatives from selected Turn to root, guaranteeing coherent path:
+After cascade, WorkingMemory rebuild walks `HAS_ALTERNATIVE.isActive=true` Alternatives from selected Turn to root, guaranteeing coherent path:
 ```typescript
 while (turn) {
-  const alt = turn.alternatives.find(a => a.id === altId);
-  path.unshift({ turnId: turn.id, alternativeId: alt.id, episodeId: alt.episodeId });
+  const alt = getAlternativeViaHasAlternative(turn, altId);
+  path.unshift({
+    turnId: turn.id,
+    alternativeId: alt.id,
+    episode: getHasContentTarget(alt)
+  });
 
-  if (!turn.parentTurnId) break;
-  turn = getTurn(turn.parentTurnId);
-  altId = alt.inputContext.parentAlternativeId;
+  if (!hasChildOfEdge(turn)) break;
+  turn = getParentTurnViaChildOf(turn);
+  altId = getRespondsToTarget(alt)?.id;
 }
 ```
 
@@ -1005,11 +1008,11 @@ while (turn) {
 - Triggered by Edit action on a user Turn.
 - Creates new alternative referencing new Episode; immediately set to `isActive=true`.
 - Prior alternatives remain for audit; user can switch back anytime.
-- Descendant agent alternatives recompute cache status: compare their `inputContext.parentAlternativeId` to new parent active alternative.
+- Descendant agent alternatives recompute cache status: compare their `RESPONDS_TO` targets to new parent active alternative.
 
 #### Agent Alternatives (Process Variations & Regenerations)
 - Triggered when user regenerates, tries another Process, or continues from another parent alternative.
-- Each records `processId`, `createdAt`, and `inputContext.parentAlternativeId`.
+- Each creates `EXECUTED_BY` edge, records `createdAt`, and sets `RESPONDS_TO` to the parent Alternative.
 - User chooses which agent alternative to display; system records the choice.
 
 ---
@@ -1019,14 +1022,14 @@ while (turn) {
 ```typescript
 function deriveCacheStatus(turn, alternative) {
   if (turn.speaker === 'user') return 'valid';
-  if (alternative.episodeId === null) return 'generating';
+  if (!hasContentEdge(alternative)) return 'generating';
 
-  if (!turn.parentTurnId) return 'valid';
+  if (!hasChildOfEdge(turn)) return 'valid';
 
-  const parentTurn = getTurn(turn.parentTurnId);
-  const parentActiveId = parentTurn?.alternatives.find(a => a.isActive)?.id;
+  const parentTurn = getParentTurnViaChildOf(turn);
+  const parentActive = getActiveAlternativeViaHasAlternative(parentTurn);
 
-  return alternative.inputContext.parentAlternativeId === parentActiveId
+  return getRespondsToTarget(alternative)?.id === parentActive?.id
     ? 'valid'
     : 'stale';
 }
@@ -1040,7 +1043,7 @@ Regeneration is lazy. Stale alternatives remain until the user explicitly regene
 
 ---
 
-### WorkingMemory Assembly from User Selection
+### WorkingMemory Assembly from User Selection (Computed View)
 
 ```typescript
 function assembleWorkingMemory(conversationId, currentTurnId, currentAlternativeId) {
@@ -1049,13 +1052,17 @@ function assembleWorkingMemory(conversationId, currentTurnId, currentAlternative
   let altId = currentAlternativeId;
 
   while (turn) {
-    const alt = turn.alternatives.find(a => a.id === altId && a.isActive);
-    path.unshift({ turnId: turn.id, alternativeId: alt.id, episodeId: alt.episodeId });
+    const alt = getAlternativeViaHasAlternative(turn, altId);
+    path.unshift({
+      turnId: turn.id,
+      alternativeId: alt.id,
+      episode: getHasContentTarget(alt)
+    });
 
-    if (!turn.parentTurnId) break;  // reached root
+    if (!hasChildOfEdge(turn)) break;  // reached root
 
-    turn = loadTurn(turn.parentTurnId);                 // structural parent
-    altId = alt.inputContext.parentAlternativeId;       // which alternative in that Turn
+    turn = getParentTurnViaChildOf(turn);               // structural parent
+    altId = getRespondsToTarget(alt)?.id;               // which alternative in that Turn
   }
 
   return buildWorkingMemory(conversationId, path.slice(-10));
@@ -1063,6 +1070,11 @@ function assembleWorkingMemory(conversationId, currentTurnId, currentAlternative
 ```
 
 - Traversal respects the user’s on-screen selections only.
+- WorkingMemory is computed on demand; no WorkingMemory node or edges are persisted.
+- immediateEpisodes: HAS_TURN → HAS_ALTERNATIVE (isActive=true) → HAS_CONTENT → Episode.
+- summaries: traverse HAS_SUMMARY edges from Conversation.
+- activeEntities: traverse HAS_ACTIVE_ENTITY edges from Conversation.
+- introspectionContext: user-scoped Introspection Episodes (Episode.group_id = user) queried separately.
 - WorkingMemory rebuilds whenever the user toggles `isActive` or adds new Turns, guaranteeing the agent sees the same path.
 
 ---
@@ -1072,7 +1084,7 @@ function assembleWorkingMemory(conversationId, currentTurnId, currentAlternative
 - **GET `/api/v1/conversations/{id}/tree`** – Returns Turns plus full `alternatives[]`, `isActive`, `inputContext`, and derived cache statuses.
 - **POST `/api/v1/conversations/{id}/turns/{turnId}/alternatives`** – Creates new alternative (user edit or agent regeneration). Agent executions respond with `202 Accepted` and status polling.
 - **PUT `/api/v1/conversations/{id}/turns/{turnId}/alternatives/{altId}/activate`** – Records UI selection by toggling `isActive` and returns affected child Turns for cache indicator updates.
-- **POST `/api/v1/conversations/{id}/turns`** – Continues conversation from explicit `{parentTurnId, parentAlternativeId}` context; optional flag auto-regenerates stale parent first.
+- **POST `/api/v1/conversations/{id}/turns`** – Continues conversation from explicit `{CHILD_OF.viaAlternative}` context; optional flag auto-regenerates stale parent first.
 
 ---
 
@@ -1081,13 +1093,14 @@ function assembleWorkingMemory(conversationId, currentTurnId, currentAlternative
 ```typescript
 function onAlternativeClick(turnId, direction) {
   const turn = getTurn(turnId);
-  const current = turn.alternatives.findIndex(a => a.isActive);
-  const next = direction === 'next'
-    ? (current + 1) % turn.alternatives.length
-    : (current - 1 + turn.alternatives.length) % turn.alternatives.length;
+  const alternatives = getAlternativesViaHasAlternative(turn);
+  const currentIdx = alternatives.findIndex(a => isHasAlternativeActive(turn, a));
+  const nextIdx = direction === 'next'
+    ? (currentIdx + 1) % alternatives.length
+    : (currentIdx - 1 + alternatives.length) % alternatives.length;
 
-  turn.alternatives[current].isActive = false;
-  turn.alternatives[next].isActive = true;
+  setHasAlternativeIsActive(turn, alternatives[currentIdx], false);
+  setHasAlternativeIsActive(turn, alternatives[nextIdx], true);
 
   recomputeDescendantCacheStatus(turnId);
   rebuildWorkingMemory();
@@ -1124,15 +1137,15 @@ User flow:
 
 ### Storage & Indexing
 
-- `idx_turn_active_alt` on `(turnId, alternatives.isActive)` for quick active retrieval.
-- `idx_alt_parent_ref` on `(parentTurnId, alternatives.inputContext.parentAlternativeId)` for cache propagation.
-- Optional partial index on `(conversationId, alternatives.cacheStatus)` to surface stale nodes in UI.
+- `idx_turn_active_alt` on `(turnId, HAS_ALTERNATIVE.isActive)` for quick active retrieval.
+- `idx_alt_parent_ref` on `(CHILD_OF.target, RESPONDS_TO.target)` for cache propagation.
+- Optional partial index on `(conversationId, Alternative.cacheStatus)` to surface stale Alternatives in UI.
 
 ---
 
 ### Migration Strategy
 
-1. **Schema:** Ensure `alternatives[]` records `inputContext.parentAlternativeId` for each entry (parent Turn already provided by Turn.parentTurnId); migrate legacy turns to single alternatives.
+1. **Schema:** Alternatives are nodes with `RESPONDS_TO` edges to parent Alternatives; structural parent Turn provided by `CHILD_OF` edge. Each Turn has at least one Alternative.
 2. **User Edits:** Ship UI for creating alternatives; persist `isActive` per user selection.
 3. **Agent Variants:** Support “Try Different Process” and “Regenerate” flows generating new alternatives asynchronously.
 4. **Active Path:** Expose API to toggle `isActive`; recompute cache state + WorkingMemory after each toggle.
@@ -1179,7 +1192,7 @@ User flow:
    - forkOriginTurnId = specified turnId
    - title = provided or "Fork of {parent.title}"
    - userId = same as parent (user owns both)
-   - processId = parent.processId (inherit preferred Process)
+   - EXECUTED_BY = parent DEFAULT_PROCESS (inherit preferred Process)
    - status = 'active'
 
 3. Copy activeEntities (if requested)
@@ -1255,61 +1268,61 @@ Reference Turn is read-only and links back to parent conversation for full conte
 
 ## Process Ownership: UI Hint vs Execution Truth
 
-### Dual processId Purposes
+### DEFAULT_PROCESS (UI Hint) vs EXECUTED_BY (Execution Truth)
 
 ```typescript
 Conversation {
-  processId: string | null  // mutable UI hint
+  // Process preference expressed via DEFAULT_PROCESS edge (mutable target)
 }
 
 Alternative {
-  processId: string | null  // immutable execution record
+  // Execution truth expressed via EXECUTED_BY edge (immutable target)
 }
 ```
 
-- **Conversation.processId:** remembers the user’s most recent Process selection to prefill the UI dropdown.
-- **Alternative.processId:** permanently records which Process actually executed for that alternative.
+- **Conversation DEFAULT_PROCESS edge:** remembers the user’s most recent Process selection to prefill the UI dropdown.
+- **Alternative EXECUTED_BY edge:** permanently records which Process actually executed for that Alternative.
 
 ---
 
-### Conversation.processId — Persistent UI Hint
+### DEFAULT_PROCESS — Persistent UI Hint
 
 **Use case:** Provide sensible default when user clicks “Next agent turn.”
 
 ```typescript
 function createAgentTurn(convId, selectedProcessId) {
   // 1. Create alternative
-  const alt = new Alternative({ processId: selectedProcessId, ... });
+  const alt = new Alternative({});
+  createExecutedByEdge(alt.id, selectedProcessId);
 
   // 2. Update hint (idempotent)
-  const conversation = getConversation(convId);
-  conversation.processId = selectedProcessId;
+  createOrUpdateDefaultProcessEdge(convId, selectedProcessId);
 
-  // 3. Execute using the alternative’s processId
-  executeProcess(alt.processId, ...);
+  // 3. Execute using the alternative’s EXECUTED_BY target
+  executeProcess(getExecutedByTarget(alt), ...);
 }
 ```
 
 - Mutable and idempotent.
-- May be null for new conversations until the first agent turn.
+- May be absent for new conversations until the first agent turn.
 - Not a source of truth for execution—purely convenience.
 
 ---
 
-### Alternative.processId — Immutable Execution Record
+### EXECUTED_BY — Immutable Execution Record
 
 **Use case:** Audit, replay, regenerate, analyze.
 
 ```json
 Turn 4 alternatives:
 [
-  { "id": "alt-1", "processId": "claude-sonnet", "episodeId": "ep-101" },
-  { "id": "alt-2", "processId": "gpt-4-turbo", "episodeId": "ep-102" }
+  { "id": "alt-1", "executedBy": "claude-sonnet" },
+  { "id": "alt-2", "executedBy": "gpt-4-turbo" }
 ]
 ```
 
-- Set when alternative is created and never changes.
-- Regeneration uses this value to reproduce the same agent behavior.
+- Set when Alternative is created and never changes.
+- Regeneration uses this edge to reproduce the same agent behavior.
 - Analytics / observability derive counts per Process from these records.
 
 ---
@@ -1317,19 +1330,19 @@ Turn 4 alternatives:
 ### Update Flow Diagram
 
 ```
-User selects Process (UI default = conversation.processId)
+User selects Process (UI default = DEFAULT_PROCESS edge)
         │
         ▼
-Create alternative → alternative.processId = selection (immutable)
+Create alternative → EXECUTED_BY = selection (immutable)
         │
         ▼
-Update conversation.processId = selection (mutable hint)
+Update DEFAULT_PROCESS = selection (mutable hint)
         │
         ▼
-Execute process(alternative.processId)
+Execute process(EXECUTED_BY target)
 ```
 
-Execution never reads conversation.processId; it only updates it for convenience.
+Execution never reads DEFAULT_PROCESS for running a Process; it only updates it for convenience.
 
 ---
 
@@ -1337,15 +1350,15 @@ Execution never reads conversation.processId; it only updates it for convenience
 
 ```
 Timeline:
-T1 agent turn → conversation.processId = 'claude'
+T1 agent turn → DEFAULT_PROCESS = 'claude'
 T2 agent turn → user picks 'gpt-4'
 T3 agent turn → user returns to 'claude'
 
 Current:
-- conversation.processId = 'claude'
-- T1 alternative.processId = 'claude'
-- T2 alternative.processId = 'gpt-4'
-- T3 alternative.processId = 'claude'
+- DEFAULT_PROCESS = 'claude'
+- T1 EXECUTED_BY = 'claude'
+- T2 EXECUTED_BY = 'gpt-4'
+- T3 EXECUTED_BY = 'claude'
 ```
 
 At T2 the user experimented with GPT-4. Later, the hint returned to Claude. Alternative-level data still shows what actually ran for T2.
@@ -1354,16 +1367,6 @@ At T2 the user experimented with GPT-4. Later, the hint returned to Claude. Alte
 
 ### API Patterns
 
-- **GET Conversation:** returns `processId` to populate “Next turn with …” UI.
-- **POST /turns (agent):** request includes selected Process; server creates alternative with that ProcessId and updates conversation.processId.
-- **POST /turns/{turnId}/alternatives/{altId}/regenerate:** server reads the alternative’s processId and re-runs that Process, leaving conversation.processId untouched.
-
----
-
-### Migration Notes
-
-- Existing conversations: interpret processId as last-used hint; allow null if unknown.
-- Existing alternatives: ensure future schema writes always include processId for agent/system alternatives.
-- Execution pipeline: refactor to reference `alternative.processId` exclusively; treat conversation.processId as optional input to UI only.
-
----
+- **GET Conversation:** returns DEFAULT_PROCESS target to populate “Next turn with …” UI.
+- **POST /turns (agent):** request includes selected Process; server creates Alternative, sets EXECUTED_BY to that Process, and updates DEFAULT_PROCESS.
+- **POST /turns/{turnId}/alternatives/{altId}/regenerate:** server reads the Alternative’s EXECUTED_BY target and re-runs that Process, leaving DEFAULT_PROCESS untouched.
