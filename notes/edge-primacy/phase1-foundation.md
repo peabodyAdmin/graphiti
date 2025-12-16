@@ -1,9 +1,22 @@
 # Phase 1: 00-foundation.md Updates
 
 ## Context
+- This is phase 1 of multistep process to convert _most_ of the property ids with edge-based construction. 
 - Replace property-based pointers with graph edges in `00-foundation.md`.
 - Dual-write during migration (properties + edges).
 - Documentation update only.
+
+## Guiding Principles
+
+1. **Edge-primacy**: Replace property pointers (`*Id` fields) with graph edges. Properties point to nothing; edges connect things.
+
+2. **Deprecate, don't delete**: Mark replaced properties as deprecated with their edge replacement noted. Removal happens later.
+
+3. **group_id is untouchable**: Graphiti uses `group_id` for Episode/Entity scoping. It remains a property. No edge. No discussion.
+
+4. **WorkingMemory is computed**: No edges. Built at runtime via traversal.
+
+5. **19 edges, no more**: The reference table is authoritative. Don't invent edges.
 
 ## Edge Type Reference
 | Edge Type | From → To | Properties | Replaces |
@@ -58,29 +71,29 @@
 4. Dual-Write: keep properties during migration, document deprecation (group_id remains a property for Graphiti compatibility).
 
 ## Edits for 00-foundation.md
-- [ ] ### Edit 1.1: Service Entity (ownerId → OWNED_BY)
+- [x] ### Edit 1.1: Service Entity (ownerId → OWNED_BY)
   - Location: Service entity definition.
   - Replace ownerId property with deprecated note; add relationship block for OWNED_BY.
-- [ ] ### Edit 1.2: Tool Entity - Service/Secret Dependency
+- [x] ### Edit 1.2: Tool Entity - Service/Secret Dependency
   - Location: Tool entity definition.
   - Deprecate ownerId/serviceId/connectionParams.secretId; add OWNED_BY, USES_SERVICE, USES_SECRET relationships and vault note.
-- [ ] ### Edit 1.3: Conversation Entity - Structure & References
+- [x] ### Edit 1.3: Conversation Entity - Structure & References
   - Deprecate userId/processId/activeEntities/parentConversationId/forkOrigin*; add OWNED_BY, DEFAULT_PROCESS, HAS_ACTIVE_ENTITY, FORKED_FROM, HAS_TURN relationships.
-- [ ] ### Edit 1.4: ConversationTurn Entity - Structure & Alternatives
+- [x] ### Edit 1.4: ConversationTurn Entity - Structure & Alternatives
   - Deprecate conversationId/parentTurnId/alternatives array; add HAS_TURN, CHILD_OF, HAS_ALTERNATIVE edges and sequences in edges.
-- [ ] ### Edit 1.5: Summary Entity - Lineage
+- [x] ### Edit 1.5: Summary Entity - Lineage
   - Deprecate episodeId/sourceEpisodeIds/priorTurnId/createdBy; add HAS_SUMMARY, SUMMARIZES, HAS_CONTENT, COVERS_UP_TO, CREATED_BY_PROCESS relationships.
-- [ ] ### Edit 1.6: WorkingMemory Entity - Computed View
+- [x] ### Edit 1.6: WorkingMemory Entity - Computed View
   - Clarify no stored edges; computed via traversal of HAS_ALTERNATIVE/HAS_SUMMARY/HAS_ACTIVE_ENTITY/HAS_CONTENT.
-- [ ] ### Edit 1.7: ProcessStep - Dependencies
+- [x] ### Edit 1.7: ProcessStep - Dependencies
   - Deprecate toolId/processId/dependsOn arrays; add CALLS_TOOL/CALLS_PROCESS/DEPENDS_ON edges.
 
 ## Validation Checklist
-- [ ] All deprecated properties marked and replacement edges documented.
-- [ ] All relationship blocks added with correct edge types/properties.
-- [ ] Dual-write notes present for ownerId and other props kept temporarily.
-- [ ] Edge type names match reference table.
-- [ ] Context assembly/WorkingMemory described as computed (no edges).
+- [x] All deprecated properties marked and replacement edges documented.
+- [x] All relationship blocks added with correct edge types/properties.
+- [x] Dual-write notes present for ownerId and other props kept temporarily.
+- [x] Edge type names match reference table.
+- [x] Context assembly/WorkingMemory described as computed (no edges).
 
 ## Cross-File Dependencies
 - Depends on: None.

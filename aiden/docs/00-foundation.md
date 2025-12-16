@@ -19,7 +19,6 @@ Together these concepts ensure every behavior is configured, versioned, and obse
 
 **State**
 - `id` (string, immutable)
-- `ownerId` (string, immutable; set from auth context)
 - `name` (string, mutable)
 - `type` (enum: `neo4j_graph`, `rest_api`, `llm_provider`, `mcp_server`; immutable)
 - `connectionSchema` (JSON Schema object defining required/optional connection parameters)
@@ -35,17 +34,20 @@ Together these concepts ensure every behavior is configured, versioned, and obse
   independently whether template exists or is archived. Soft reference may point to archived template.
 
 **Valid Mutations**
-- **Create:** Provide type, protocol, and connectionSchema defining parameter shape; capture `ownerId` from auth context; optionally originate from `serviceTemplateId`.
+- **Create:** Provide type, protocol, and connectionSchema defining parameter shape; establish `OWNED_BY` edge from auth context; optionally originate from `serviceTemplateId`.
 - **Update:** May adjust name, enabled flag, schema (with version increment); status updated via health checks.
 - **Delete:** Allowed only when no Tools reference the Service.
 
 **Invariants**
 - Type and protocol combinations must match (e.g., `neo4j_graph` requires `bolt` or `bolt+s`).
 - `connectionSchema` must be valid JSON Schema.
-- Services with `requiresSecret=true` mandate that Tools provide `secretId` in their connection params.
+- Services with `requiresSecret=true` mandate that Tools create `USES_SECRET` edges to vault-backed Secrets.
 - Disabled Services cannot report `status = healthy`.
-- If Service uses `secretId`, Secret.ownerId MUST equal Service.ownerId (Secrets are never cross-user).
-- Cross-owner references require sharing: Tool.ownerId != Service.ownerId → Service.shared MUST be true.
+- If Service uses a Secret, Secret ownership MUST match the Service owner (enforced via `OWNED_BY` edges; Secrets are never cross-user).
+- Cross-owner references require sharing: Tool and Service owners differ → Service.shared MUST be true.
+
+**Relationships**
+- `Service --OWNED_BY--> User` (`created_at`)
 
 **Examples**
 
@@ -84,7 +86,6 @@ LLM Provider Service connectionSchema:
 
 **State**
 - `id` (string, immutable)
-- `userId` (string, immutable; owner set from authenticated context)
 - `name` (string, mutable)
 - `type` (`api_key`, `oauth_token`, `password`, `certificate`; immutable)
 - `encryptedValue` (opaque blob, immutable once written)
@@ -92,23 +93,23 @@ LLM Provider Service connectionSchema:
 - `shared` (boolean, default `false`, mutable; Secrets remain owner-only even if set true)
 
 **Valid Mutations**
-- **Create:** Store encrypted payload and metadata; `userId` captured from auth context and never changed.
+- **Create:** Store encrypted payload and metadata; establish `OWNED_BY` edge from auth context and never change ownership.
 - **Update:** Rotate `encryptedValue`, rename, or change metadata without altering `id`.
 - **Delete:** Allowed only when no Service currently `USES` it.
 
 **Invariants**
 - `encryptedValue` never leaves storage unredacted.
-- `userId` is immutable ownership; all Secret reads/writes are filtered to the owning `userId`.
-- Secret references (Service/Tool connection secretId, Process usage) MUST match the same `userId`; cross-user access returns 404.
+- Ownership is immutable; all Secret reads/writes are filtered to the owning User.
+- Secret references (Service/Tool usage) MUST match the same owner; cross-user access returns 404.
 - Secrets cannot be cross-user shared for execution; `shared` flag does not grant access beyond owner.
 - Each Secret can be referenced by multiple Services but remains scoped per user.
 
 **Relationships**
-- `Service --USES--> Secret`
-- `Secret --OWNED_BY--> User`
+- `Tool --USES_SECRET--> Secret` (`scope`; credentials remain vaulted)
+- `Secret --OWNED_BY--> User` (`created_at`)
 
 **References**
-- Service records `connection.secretId` for credential lookup; Tool/Process execution validates the Secret belongs to the same user as the Conversation.
+- `USES_SECRET` edges from Tools authorize access. Execution validates the Secret belongs to the same user as the Conversation.
 
 ---
 
@@ -118,10 +119,8 @@ LLM Provider Service connectionSchema:
 
 **State**
 - `id` (string, immutable)
-- `ownerId` (string, immutable; set from auth context)
 - `name` (string, mutable)
-- `serviceId` (string reference, immutable)
-- `connectionParams` (object conforming to Service.connectionSchema)
+- `connectionParams` (object conforming to Service.connectionSchema; credentials supplied via `USES_SECRET` edge when required)
 - `operation` (discriminated union by Service type)
 - `inputSchema` (JSON Schema for operation inputs)
 - `outputSchema` (JSON Schema for operation outputs)
@@ -137,27 +136,30 @@ LLM Provider Service connectionSchema:
   independently whether template exists or is archived. Soft reference may point to archived template.
 
 **Valid Mutations**
-- **Create:** Bind operation + schemas + connectionParams to existing Service; capture `ownerId` from auth; optionally originate from `toolTemplateId`.
+- **Create:** Bind operation + schemas + connectionParams to existing Service; establish `OWNED_BY`, `USES_SERVICE`, and `USES_SECRET` (if required) edges; optionally originate from `toolTemplateId`.
 - **Update:** Change description, schemas, operation parameters, or enabled flag.
 - **Delete:** Allowed only when no ProcessSteps reference the Tool.
 
 **Invariants**
 - `connectionParams` must validate against Service `connectionSchema`.
-- If Service has `requiresSecret=true`, connectionParams must include valid `secretId`.
-- Cross-owner Service reference requires `Service.shared=true`; otherwise reject.
+- If Service has `requiresSecret=true`, Tool must create `USES_SECRET` edge to a valid Secret.
+- Cross-owner Service reference requires `Service.shared=true`; otherwise reject (enforced alongside `USES_SERVICE` edge).
 - Operation type must align with Service type.
 - `inputSchema` keys must match variable names used inside `operation` definitions.
+
+**Relationships**
+- `Tool --OWNED_BY--> User` (`created_at`)
+- `Tool --USES_SERVICE--> Service` (`connectionParams`; connection parameters carried on the edge)
+- `Tool --USES_SECRET--> Secret` (`scope`; credentials stay in vault, not the graph)
 
 **Example**
 
 Tool for specific Neo4j instance:
 ```json
 {
-  "serviceId": "service-neo4j-graphiti",
   "connectionParams": {
     "endpoint": "bolt://localhost:7687",
     "database": "graphiti",
-    "secretId": "secret-neo4j-prod-creds",
     "maxConnectionPoolSize": 100
   },
   "operation": {
@@ -166,15 +168,14 @@ Tool for specific Neo4j instance:
   }
 }
 ```
+Edges: `USES_SERVICE -> service-neo4j-graphiti`, `USES_SECRET -> secret-neo4j-prod-creds`, `OWNED_BY -> user-123`.
 
 Tool for specific LLM endpoint:
 ```json
 {
-  "serviceId": "service-anthropic-claude",
   "connectionParams": {
     "endpoint": "https://api.anthropic.com",
     "model": "claude-sonnet-4-20250514",
-    "secretId": "secret-anthropic-api-key",
     "temperature": 0.7,
     "maxTokens": 4096
   },
@@ -184,6 +185,8 @@ Tool for specific LLM endpoint:
     "promptTemplate": "{{instruction}}\n\n{{content}}"
   }
 }
+```
+Edges: `USES_SERVICE -> service-anthropic-claude`, `USES_SECRET -> secret-anthropic-api-key`, `OWNED_BY -> user-123`.
 
 ---
 
@@ -273,7 +276,8 @@ When a Tool is created from a ToolTemplate:
 ---
 
 **Sharing Model Note**
-- ServiceTemplate, ToolTemplate, Service, Tool, and Secret all carry `ownerId` and `shared` flags with unified semantics: default private (`shared=false`), optionally discoverable when `shared=true`. Secrets remain owner-only even if marked shared; cross-user Secret execution is prohibited.
+- ServiceTemplate and ToolTemplate carry `ownerId` and `shared` properties with unified semantics: default private (`shared=false`), optionally discoverable when `shared=true`.
+- Service, Tool, and Secret express ownership via `OWNED_BY` edges and use `shared` flags where applicable. Secrets remain owner-only even if marked shared; cross-user Secret execution is prohibited.
 ```
 
 ---
@@ -284,7 +288,6 @@ When a Tool is created from a ToolTemplate:
 
 **State**
 - `id`, `name`, `description`
-- `ownerId` (UUID, immutable; set from authenticated context)
 - `initialContext` (list of required input variable names)
 - `steps` (ordered collection of ProcessStep documents)
 - `outputTemplate` (Handlebars-style string)
@@ -304,12 +307,13 @@ When a Tool is created from a ToolTemplate:
 - Every variable referenced in `outputTemplate` must originate from `initialContext` or step outputs.
 
 **Relationships**
-- `Process --CALLS--> Tool`
-- `Conversation --USES_PROCESS--> Process`
+- `Process --OWNED_BY--> User` (`created_at`)
+- Defined via ordered `steps`; ProcessSteps connect to Tools/Processes using `CALLS_TOOL` / `CALLS_PROCESS` edges.
+- Conversations link preferred Processes via `DEFAULT_PROCESS` edges.
 
 **References**
-- Conversations store `processId`
-- Tools may reference Processes for recursive execution (via `rest_call` operation type)
+- Conversations store Process preference through `DEFAULT_PROCESS` edge.
+- ProcessSteps drive recursive execution; `CALLS_PROCESS` edges must stay within `maxRecursionDepth`.
 
 ---
 
@@ -319,15 +323,12 @@ When a Tool is created from a ToolTemplate:
 
 **State**
 - `id` (string, unique per Process)
-- `toolId` (string reference, optional) - References Tool for leaf operations
-- `processId` (string reference, optional) - References Process for recursive orchestration
 - `inputs` (map of parameter → interpolation expression)
 - `output.variable` (string)
 - `output.tokenBudget` (number, optional)
 - `output.required` (boolean)
 - `execution.mode` (`parallel` | `sequential`)
 - `execution.condition` (string expression, optional)
-- `execution.dependsOn` (list of step IDs)
 - `execution.timeout` (number, optional)
 - `execution.interactionMode` ('auto' | 'manual')
 
@@ -336,21 +337,21 @@ When a Tool is created from a ToolTemplate:
 
 **Invariants**
 - `inputs` must match the requirements of the referenced Tool or Process.
-- `dependsOn` cannot reference the step itself or form cycles; parallel steps cannot depend on each other.
-- `dependsOn` cannot reference a step that is not mentioned prior to the dependant in the Process.
-- `toolId` must refer to an enabled Tool whose Service is healthy when executed.
-- `processId` must refer to an enabled Process within recursion limits.
-- Exactly one of `toolId` or `processId` MUST be specified.
-- If `processId` specified: inputs must satisfy target Process `initialContext` variables.
-- If `toolId` specified: inputs must satisfy target Tool `inputSchema` specifications.
+- `DEPENDS_ON` edges cannot reference the step itself or form cycles; parallel steps cannot depend on each other.
+- `DEPENDS_ON` edges cannot target a step that is not mentioned prior to the dependant in the Process.
+- Exactly one of `CALLS_TOOL` or `CALLS_PROCESS` MUST be specified.
+- `CALLS_TOOL` target must be an enabled Tool whose Service is healthy when executed; inputs must satisfy target Tool `inputSchema` specifications.
+- `CALLS_PROCESS` target must be an enabled Process within recursion limits; inputs must satisfy target Process `initialContext` variables.
 - Recursive Process invocation counts toward `maxRecursionDepth`.
 
 **Relationships**
-- Defined as part of the parent Process specification
-- May reference a Tool (leaf operation) or another Process (recursive orchestration)
+- `ProcessStep --CALLS_TOOL--> Tool` (`timeout`, `interactionMode`)
+- `ProcessStep --CALLS_PROCESS--> Process` (`timeout`)
+- `ProcessStep --DEPENDS_ON--> ProcessStep` (`order`; captures sequencing + dependency graph)
 
 **References**
-- Stores `toolId` (for Tool invocation) or `processId` (for Process recursion) plus `dependsOn` identifiers
+- `CALLS_TOOL` / `CALLS_PROCESS` edges identify the invocation target.
+- `DEPENDS_ON` edges capture execution ordering and gating.
 - Target validation: referenced Tool/Process must be enabled and healthy before execution
 
 For LLM Tools, the same `inputs` map supplies the values that fill the Tool’s prompt template. Variable interpolation happens at execution time so prompts can adapt to prior step outputs.
@@ -365,19 +366,22 @@ For LLM Tools, the same `inputs` map supplies the values that fill the Tool’s 
 **Example**
 ```json
 {
-  "toolId": "tool-summarize",
   "inputs": {
     "instruction": "Extract just the birthday",
     "content": "{step.searchResults}"
+  },
+  "output": {
+    "variable": "birthday",
+    "required": true
   }
 }
 ```
+Edges: `CALLS_TOOL -> tool-summarize`.
 
 **Recursive Process Invocation Example**
 ```json
 {
   "id": "step-compress-context",
-  "processId": "process-sequential-compression",
   "inputs": {
     "sourceEpisodeIds": "{step.searchResults}",
     "targetCompressionRatio": "0.3"
@@ -388,6 +392,7 @@ For LLM Tools, the same `inputs` map supplies the values that fill the Tool’s 
   }
 }
 ```
+Edges: `CALLS_PROCESS -> process-sequential-compression`.
 This step invokes another Process recursively, enabling composition of complex workflows from simpler Processes.
 
 ---
@@ -399,73 +404,69 @@ This step invokes another Process recursively, enabling composition of complex w
 **State**
 - `id` (string, immutable)
 - `title` (string, optional, mutable)
-- `userId` (string, immutable)
-- `processId` (string reference, mutable) - **UI hint** tracking user’s most recently selected Process for new turns
 - `status` (`active` | `archived`)
 - `createdAt`, `updatedAt`
-- `activeEntities` (array of Graphiti Entity UUIDs currently relevant to this conversation)
-- `parentConversationId` (string, optional, immutable) - if this conversation was forked from another
-- `forkOriginTurnId` (string, optional, immutable) - which turn in parent spawned this fork
-- `forkOriginAlternativeId` (string, optional, immutable) - which alternative in the parent Turn was active when the fork occurred (complete provenance of “what the user saw” at fork time)
 
-**Process Ownership Semantics**
+**Process Selection Semantics**
 
-**Conversation.processId (UI hint)**
+**Conversation DEFAULT_PROCESS edge (UI hint)**
 - Purpose: Persistent preference tracking for UI convenience.
 - Mutability: Updates idempotently when user selects a Process for a new agent turn.
 - Not execution source of truth: Reflects latest preference, not historical execution.
-- Usage: UI shows “Next turn with [processId]” as default Process selector value.
+- Usage: UI shows “Next turn with [Process]” as default selector value.
 
-**Alternative.processId (execution truth)**
+**Alternative EXECUTED_BY edge (execution truth)**
 - Purpose: Immutable audit trail of which Process created the alternative.
 - Mutability: Set at alternative creation and never changes.
 - Source of truth: Used for replay, debugging, analytics, and regenerations.
-- Usage: Execution engine reads Alternative.processId when running or re-running work.
+- Usage: Execution engine follows the Alternative’s `EXECUTED_BY` edge when running or re-running work.
 
 **Update Flow Example**
 ```typescript
 function createAgentTurn(conversationId, selectedProcessId) {
   const conversation = getConversation(conversationId);
 
-  const alternative = {
-    episodeId: null,
-    processId: selectedProcessId,   // execution truth (immutable)
-    isActive: true,
-    cacheStatus: 'generating',
-    inputContext: { parentAlternativeId: ... }
-  };
+  createOrUpdateDefaultProcessEdge(conversation.id, selectedProcessId);  // UI hint update
 
-  conversation.processId = selectedProcessId;  // UI hint update
+  const alternative = createAlternative({
+    turnId: conversation.currentTurnId,
+    content: ...,
+    isActive: true
+  });
 
-  executeProcess(alternative.processId, ...);  // Always use alternative’s processId
+  createExecutedByEdge(alternative.id, selectedProcessId);  // execution truth (immutable)
+  executeProcess(selectedProcessId, ...);
 }
 ```
 
-**Key Insight:** Conversation.processId may change as user experiments with Claude/GPT-4/etc. Alternative.processId preserves what actually ran so past responses remain traceable.
+**Key Insight:** DEFAULT_PROCESS edges may change as the user experiments; `EXECUTED_BY` edges preserve what actually ran so past responses remain traceable.
 
 **Valid Mutations**
-- **Create:** Instantiate root conversation with assigned Process.
-- **Update:** Rename, switch Process hint, archive/unarchive.
+- **Create:** Instantiate root Conversation with assigned Process (`DEFAULT_PROCESS` edge) and owner (`OWNED_BY` edge).
+- **Update:** Rename, switch Process hint via `DEFAULT_PROCESS` edge, archive/unarchive.
 - **Delete:** **Not allowed.** Conversations are permanent audit records; archival is achieved via `status='archived'`, never by removal.
 
 **Invariants**
-- If `processId` is set it must reference an enabled Process; null allowed for conversations that have never run an agent turn.
+- If `DEFAULT_PROCESS` edge exists it must target an enabled Process; null allowed for conversations that have never run an agent turn.
 
 **Relationships**
-- `Conversation --HAS_TURN--> ConversationTurn`
-- `WorkingMemory --BELONGS_TO--> Conversation`
+- `Conversation --OWNED_BY--> User` (`created_at`)
+- `Conversation --DEFAULT_PROCESS--> Process` (`since`)
+- `Conversation --HAS_ACTIVE_ENTITY--> Entity` (`addedAt`, `relevance`)
+- `Conversation --FORKED_FROM--> Conversation` (`originTurn`, `originAlternative`)
+- `Conversation --HAS_TURN--> ConversationTurn` (`sequence`)
 
 **References**
-- Conversation.processId references a Process as mutable UI hint.
-- ConversationTurn alternatives reference Processes via `alternative.processId` as immutable execution truth.
-- Turns and WorkingMemory store `conversationId` as properties.
-- activeEntities array stores Graphiti Entity UUIDs (references into Graphiti graph).
+- `DEFAULT_PROCESS` edge records the current Process preference.
+- Alternatives link to Processes via `EXECUTED_BY` edge.
+- Conversation-to-Turn structure is expressed via `HAS_TURN` edge.
+- Active entities recorded via `HAS_ACTIVE_ENTITY` edges.
 
 **Notes**
-- **Process selection scoped to alternatives:** Each agent alternative records the Process that produced it via `alternative.processId`.
-- **Conversation.processId is UI convenience:** Updated idempotently to remember the user’s most recent Process choice for future turns.
-- **Audit trail lives in alternatives:** To answer “which Process produced this response?” read the alternative, not the conversation.
-- **Divergence expected:** Conversation.processId may differ from older alternatives after the user changes preference; that’s intentional.
+- **Process selection scoped to alternatives:** Each agent alternative records the Process that produced it via `EXECUTED_BY` edge.
+- **DEFAULT_PROCESS edge is UI convenience:** Updated idempotently to remember the user’s most recent Process choice for future turns.
+- **Audit trail lives in alternatives:** To answer “which Process produced this response?” read the alternative (or its `EXECUTED_BY` edge), not the conversation.
+- **Divergence expected:** DEFAULT_PROCESS edge may point to a different Process than older alternatives after the user changes preference; that’s intentional.
 
 ---
 
@@ -475,79 +476,67 @@ function createAgentTurn(conversationId, selectedProcessId) {
 
 **State**
 - `id` (string, immutable)
-- `conversationId` (string, immutable)
-- `parentTurnId` (string reference, nullable) - structural parent in conversation tree
-- `sequence` (number)
 - `speaker` (`user` | `agent` | `system`)
 - `turnType` (`message` | `tool_result` | `summary`)
 - `content` (string, immutable after creation) - Permanent storage for display layer; NEVER deleted even after Episode sync completes
-- `alternatives` (array of Alternative objects, mutable) - multiple attempts at this conversation position
 - `timestamp` (Date, immutable) - when Turn structure was created
 
 **Alternative Structure:**
 ```json
 {
   "id": "string",              // Alternative UUID
-  "episodeId": "string | null",       // Graphiti Episode UUID (async binding; null until worker backfills)
-  "processId": "string",       // Process that generated this (agent turns only)
   "createdAt": "timestamp",
-  "isActive": "boolean",       // True if this alternative is currently displayed in UI
-
-  // Input context: complete provenance for path reconstruction
-  "inputContext": {
-    "parentAlternativeId": "string"    // Which alternative in that Turn was active (null for root Turn alternatives)
-  },
-  
-  // Derived/computed state (not persisted)
   "hasChildren": "boolean",    // Do other Turns reference this alternative?
   "cacheStatus": "valid | stale | generating"  // Does parent selection still match?
 }
 ```
 
 **Alternative Field Notes**
-- `episodeId` (UUID, nullable): Graphiti Episode containing the alternative’s content. This begins as `null` because Alternatives are created synchronously with the Turn while Graphiti ingestion is asynchronous. The ingestion worker later backfills this field once it correlates the new Episode (named `Turn:{alternative.id}`) to the Alternative. UI rendering always uses `Alternative.content`, so users see responses immediately even before `episodeId` is populated. Episode binding primarily powers semantic search, entity extraction, and knowledge-graph enrichment.
+- Alternatives create `HAS_CONTENT` edges to Graphiti Episodes once ingestion completes. Alternatives are created synchronously while Graphiti ingestion is asynchronous. UI rendering uses Alternative content immediately; the edge powers semantic search, entity extraction, and knowledge-graph enrichment.
 
 #### Episode Binding Lifecycle
-1. **Turn + Alternative Created** – API stores immutable Turn structure and Alternative content with `episodeId = null`.
+1. **Turn + Alternative Created** – API stores immutable Turn structure and Alternative content (edge created without Episode target yet).
 2. **Event Emitted** – `TurnCreated` (or equivalent) event notifies the Graphiti ingestion worker.
 3. **Episode Written** – Worker generates the Graphiti Episode, naming it `Turn:{alternative.id}` (or using embedded Turn UUID) so it can be correlated later.
-4. **Binding Backfill** – Worker polls Graphiti, matches on the naming convention, and updates `Alternative.episodeId` to the new Episode UUID. Entity extraction + semantic features now have a stable reference.
+4. **Binding Backfill** – Worker polls Graphiti, matches on the naming convention, and establishes the `HAS_CONTENT` edge to the new Episode UUID. Entity extraction + semantic features now have a stable reference.
 
 This async pattern keeps conversation UX responsive while still feeding the knowledge graph with authoritative content.
 
 **Valid Mutations**
-- **Create Turn:** Append new Turn with initial alternative referencing Episode + Process.
-- **Add Alternative:** User edits create new user alternative; different Process creates new agent alternative.
-- **Switch Active:** Change which alternative has `isActive=true` (one per Turn).
+- **Create Turn:** Append new Turn with initial Alternative; connect via `HAS_TURN`, `HAS_ALTERNATIVE`, and `EXECUTED_BY`/`HAS_CONTENT` edges.
+- **Add Alternative:** User edits create new user Alternative; different Process creates new agent Alternative. Each Alternative connects via `HAS_ALTERNATIVE` + `RESPONDS_TO` edges.
+- **Switch Active:** Change which alternative has `HAS_ALTERNATIVE.isActive=true` (one per Turn).
 - **Delete Turn/Alternative:** Not permitted; alternatives are preserved for audit.
 
 **Invariants**
-- Each Turn must belong to exactly one Conversation.
-- Each Turn must have at least one alternative with exactly one `isActive=true` (tracks what user is viewing).
-- If `parentTurnId` is set:
+- Each Turn must belong to exactly one Conversation via `HAS_TURN` edge.
+- Each Turn must have at least one Alternative with exactly one `HAS_ALTERNATIVE.isActive=true` (tracks what user is viewing).
+- If `CHILD_OF` edge exists:
   - The referenced Turn must share the same Conversation.
-  - Every alternative’s `inputContext.parentAlternativeId` MUST reference a valid alternative in the parent Turn.
-- If `parentTurnId` is null (root Turn):
-  - All alternatives must have `inputContext.parentAlternativeId = null`.
-- `sequence` values strictly increase along the main thread.
+  - Every Alternative’s `RESPONDS_TO` edge MUST target a valid Alternative in the parent Turn.
+- Root Turns have no `CHILD_OF` edge; `RESPONDS_TO` edges are null/absent for their Alternatives.
+- `HAS_TURN.sequence` values strictly increase along the main thread.
 - User Turns can have multiple alternatives (revised prompts); Agent Turns can have multiple alternatives (Process variations); System Turns typically have a single alternative.
 
 **Relationships**
-- `Conversation --HAS_TURN--> ConversationTurn`
-- `ConversationTurn --NEXT--> ConversationTurn` (via parentTurnId; each alternative records which parent alternative it responded to via `inputContext.parentAlternativeId`)
-- `ConversationTurn.alternatives[].episodeId` references Episode in Graphiti
-- `ConversationTurn --FORK_ORIGIN--> ConversationTurn` (first turn in forked conversation references the turn in parent that spawned it)
+- `Conversation --HAS_TURN--> ConversationTurn` (`sequence`)
+- `ConversationTurn --CHILD_OF--> ConversationTurn` (`viaAlternative`)
+- `ConversationTurn --HAS_ALTERNATIVE--> Alternative` (`isActive`, `sequence`)
+- `Alternative --RESPONDS_TO--> Alternative` (preserves DAG provenance)
+- `Alternative --HAS_CONTENT--> Episode` (`source`, `createdAt`)
+- `Alternative --EXECUTED_BY--> Process` (`createdAt`)
 
 **References**
-- Stores `episodeId` per alternative linking to Graphiti content.
-- Alternatives store `inputContext.parentAlternativeId` identifying which alternative in the parent Turn (located via `parentTurnId`) supplied the input for this alternative.
+- `HAS_CONTENT` edges link Alternatives to Graphiti Episodes.
+- `RESPONDS_TO` edges identify which alternative in the parent Turn supplied the input.
+- `EXECUTED_BY` edges record which Process produced each Alternative.
 
 **Notes**
 - **User alternatives:** Created when user edits their prompt. Keeps bad attempts out of context.
 - **Agent alternatives:** Created when user tries different Process, regenerates response, or continues from different parent alternative.
-- **isActive semantics:** Tracks which alternative the user currently has displayed in the UI; system records selection, it doesn’t choose a canonical path.
-- **Cache status derivation:** Agent alternative is "stale" when `inputContext.parentAlternativeId` no longer matches the parent Turn’s active alternative; user sees “this responded to a different upstream version.”
-- **Context assembly:** WorkingMemory built by traversing `isActive` alternatives (user’s on-screen selections) from specified Turn back to root, ensuring clean context without correction chains or outdated responses.
+- **isActive semantics:** Tracked on `HAS_ALTERNATIVE.isActive`; system records selection, it doesn’t choose a canonical path.
+- **Cache status derivation:** Agent alternative is "stale" when the `RESPONDS_TO` target no longer matches the parent Turn’s active `HAS_ALTERNATIVE` selection; user sees “this responded to a different upstream version.”
+- **Context assembly:** WorkingMemory built by traversing `HAS_ALTERNATIVE.isActive=true` edges (user’s on-screen selections) from specified Turn back to root, ensuring clean context without correction chains or outdated responses.
 - **User control:** System records what’s on screen and surfaces cache validity; user decides when to switch alternatives, regenerate responses, or continue the conversation.
 
 ---
@@ -580,13 +569,13 @@ This async pattern keeps conversation UX responsive while still feeding the know
 - Large content may be chunked with internal linking
 
 **References**
-- ConversationTurns store Graphiti's `uuid` as `episodeId`
+- Alternatives link to Graphiti Episodes via `HAS_CONTENT` edges
 - WorkingMemory references Episodes via Graphiti `uuid`
 
 **Notes**
 - Episodes automatically trigger entity extraction via Graphiti
 - Extracted entities may be merged with user-created entities via deduplication
-- **Multiple Episodes per Turn:** When a Turn has multiple alternatives, each alternative owns a distinct `episodeId` so Graphiti content reflects the specific user revision or agent Process response.
+- **Multiple Episodes per Turn:** When a Turn has multiple alternatives, each alternative has its own `HAS_CONTENT` edge so Graphiti content reflects the specific user revision or agent Process response.
 
 ---
 
@@ -607,6 +596,7 @@ This async pattern keeps conversation UX responsive while still feeding the know
 
 **Path Assembly**
 - WorkingMemory context is built by traversing `isActive` alternatives from `currentTurnId:currentAlternativeId` back to the root. This ensures context reflects the specific path through the alternative tree while excluding stale alternatives.
+- Computed view only: no persistent edges are stored. WorkingMemory derives its contents by traversing `HAS_ALTERNATIVE`, `HAS_SUMMARY`, `HAS_ACTIVE_ENTITY`, and `HAS_CONTENT` edges at read time.
 
 **EntityReference Structure:**
 ```json
@@ -631,14 +621,14 @@ This async pattern keeps conversation UX responsive while still feeding the know
 **Invariants**
 - `totalTokens` must reflect sum of: immediatePath Episodes + summaries + activeEntities (with inclusion flags) + introspectionContext Episodes
 - `immediatePath` contains only Episodes from `isActive=true` alternatives.
-- Path traversal follows Turn.parentTurnId for structure and each alternative’s `inputContext.parentAlternativeId` for specific parent responses; no skipped or inactive alternatives included.
+- Path traversal follows `CHILD_OF` edges for structure and each alternative’s `RESPONDS_TO` edge for specific parent responses; no skipped or inactive alternatives included.
 - References point only to Turns/Summaries/Alternatives belonging to the same Conversation.
 
 **Relationships**
-- `WorkingMemory --BELONGS_TO--> Conversation`
+- Scoped to a single Conversation (computed association; no persisted edge)
 
 **References**
-- References Episodes from `immediatePath` and summary layers plus Graphiti Entities by UUID
+- References Episodes from `immediatePath` and summary layers plus Graphiti Entities by UUID (all derived from traversal results)
 
 ---
 
@@ -832,36 +822,34 @@ interface EntityTyping {
 
 **State**
 - `id` (string, immutable)
-- `conversationId` (string, immutable)
-- `episodeId` (string, points to summary content in Graphiti)
-- `sourceEpisodeIds` (array of Episode UUIDs that were compressed; immutable provenance)
 - `compressionLevel` (integer: `max(sourceEpisode.compressionLevel) + 1`; immutable depth indicator)
-- `priorTurnId` (string, captures last Turn included in compression window)
 - `tokenCount` (approximate size)
-- `createdBy` (processId that created this summary)
 - `createdAt` (timestamp, immutable)
 
 **Field Mutability**
-- **Immutable:** `id`, `conversationId`, `sourceEpisodeIds`, `compressionLevel`, `priorTurnId`, `createdAt`, `createdBy`
-- **Admin-mutable:** `episodeId` (may be repointed to corrected Episode content), `tokenCount` (adjusted if new Episode length differs)
+- **Immutable:** `id`, `compressionLevel`, `createdAt`
+- **Admin-mutable:** `tokenCount` (adjusted if new Episode length differs)
 
 **Valid Mutations**
-- **Create:** When compression Tool produces summary or admin manually backfills missing coverage
-- **Update (Admin only):** Repoint `episodeId` to corrected Graphiti Episode; may adjust `tokenCount` to reflect revised content. Original Episode preserved for audit.
+- **Create:** When compression Tool produces summary or admin manually backfills missing coverage, creating `SUMMARIZES`, `HAS_CONTENT`, `HAS_SUMMARY`, `COVERS_UP_TO`, and `CREATED_BY_PROCESS` edges.
+- **Update (Admin only):** Rebind `HAS_CONTENT` to corrected Graphiti Episode; may adjust `tokenCount` to reflect revised content. Original Episode preserved for audit.
 - **Delete (Admin only):** Removes Summary from conversation context; worker may schedule recompression to restore coverage.
 
 **Invariants**
-- Must reference at least one source Episode
-- CompressionLevel must be one higher than max of source Episodes
-- EpisodeId must point to valid Graphiti Episode with source="summary"
+- Must reference at least one source Episode via `SUMMARIZES` edges.
+- CompressionLevel must be one higher than max of source Episodes.
+- `HAS_CONTENT` target must point to valid Graphiti Episode with source="summary".
 
 **Relationships**
-- `Summary --SUMMARIZES--> Episode` (many source Episodes)
-- `Summary --HAS_CONTENT--> Episode` (one Graphiti Episode for content)
-- `WorkingMemory --REFERENCES--> Summary`
+- `Conversation --HAS_SUMMARY--> Summary`
+- `Summary --SUMMARIZES--> Episode` (`order`; one edge per source)
+- `Summary --HAS_CONTENT--> Episode` (`source`, `createdAt`)
+- `Summary --COVERS_UP_TO--> Turn`
+- `Summary --CREATED_BY_PROCESS--> Process`
+- WorkingMemory consumes Summary nodes for context (computed inclusion; no stored edge)
 
 **References**
-- WorkingMemory stores Summary IDs in `summaries` array
+- WorkingMemory stores Summary IDs in `summaries` array (computed from `HAS_SUMMARY` edges)
 
 ---
 
@@ -871,14 +859,13 @@ interface EntityTyping {
 
 **State**
 - `id` (string, immutable)
-- `episodeId` (string, Graphiti UUID reference, immutable) - points to Episode containing reflection content
 - `carouselPosition` (integer, 0 to maxRotation-1)
 - `conversationContext` (string, optional) - which conversation and compression event sequence triggered this (e.g., "conversation-123, compressions 45-49")
 - `createdAt` (timestamp, immutable)
 
 **Valid Mutations**
 - **Create:** Generated by async introspection process or manual injection API
-- **Update:** Replaces `episodeId` pointer to a new Graphiti Episode (persona corrections) while preserving provenance
+- **Update:** Rebinds the `HAS_CONTENT` edge to a new Graphiti Episode (persona corrections) while preserving provenance
 - **Delete:** Removes entry from carousel and triggers rebalancing/archival; used to relocate or retire notes
 
 **Invariants**
@@ -886,13 +873,13 @@ interface EntityTyping {
 - New introspection replaces oldest by position (position 0-9 cycle)
 - Replaced notes archived but not deleted
 - CarouselPosition must be within [0, maxRotation-1]; to move an entry to a new slot delete + recreate
-- Must have valid episodeId referencing Graphiti Episode with source='introspection'
+- Must have valid `HAS_CONTENT` edge targeting Graphiti Episode with source='introspection'
 
 **Relationships**
-- `Introspection --HAS_CONTENT--> Episode` (via episodeId reference)
+- `Introspection --HAS_CONTENT--> Episode` (`source`, `createdAt`)
 
 **References**
-- Stores Graphiti Episode UUID as `episodeId`
+- Stores Graphiti Episode UUID via `HAS_CONTENT` edge
 - Episode `group_id` = 'system_introspection' (separate from conversation episodes)
 - May reference conversationId in metadata for context
 
@@ -921,7 +908,7 @@ interface EntityTyping {
 
 ## Key Patterns
 - **Metadata hubs as nodes:** Service, Tool, Conversation, and Process hold rich metadata and expose explicit edges for observability and governance. Entities are managed by Graphiti with application extensions for enrichment.
-- **References via identifiers:** Frequently-used relationships (episodeId, toolId, serviceId, conversationId, entityUuid) rely on identifier references rather than explicit edges for efficiency. Entity UUIDs reference into Graphiti's graph.
+- **Edge-primacy:** Structural relationships use edges (e.g., `OWNED_BY`, `HAS_TURN`, `HAS_ALTERNATIVE`, `CALLS_TOOL/CALLS_PROCESS`, `HAS_CONTENT`). Entity UUIDs still reference into Graphiti's graph.
 - **Node-local alternatives:** ConversationTurns manage local alternative arrays (user edits, Process variations) while parent references specify which alternative was the input. WorkingMemory traverses only active alternatives, avoiding global branch semantics.
 - **Meaningful edges only:** Edges represent true structural relationships (`USES`, `EXECUTES_ON`, `PARENT`, `FORK_FROM`, `CALLS`). ID properties handle soft references.
 - **Recursive orchestration:** Processes may call other Processes (via Tools), and ConversationTurns form trees via `PARENT`/`FORK_FROM`, enabling deep recursion without redefining schemas.
