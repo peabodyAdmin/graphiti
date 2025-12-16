@@ -99,7 +99,7 @@ channels:
     messages:
       SecretCreationRequested:
         $ref: '#/components/messages/SecretCreationRequested'
-    description: Published when POST /api/v1/secrets receives valid request; includes `userId` for owner scoping and subscriber filtering.
+    description: Published when POST /api/v1/secrets receives valid request; includes `OWNED_BY` edge target for owner scoping and subscriber filtering.
     x-event-flow-diagrams:
       - secret-creation-happy
       - secret-creation-failure
@@ -109,7 +109,7 @@ channels:
     messages:
       SecretCreated:
         $ref: '#/components/messages/SecretCreated'
-    description: Published when CreateSecretWorker stores encrypted secret; payload carries owning `userId` and never includes plaintext.
+    description: Published when CreateSecretWorker stores encrypted secret; payload carries `OWNED_BY` edge target and never includes plaintext.
     x-event-flow-diagrams:
       - secret-creation-happy
 
@@ -137,7 +137,7 @@ channels:
     messages:
       SecretRotated:
         $ref: '#/components/messages/SecretRotated'
-    description: Published when RotateSecretWorker updates encrypted value; payload includes owning `userId` for downstream filtering.
+    description: Published when RotateSecretWorker updates encrypted value; payload includes `OWNED_BY` edge target for downstream filtering.
     x-event-flow-diagrams:
       - secret-rotation-happy
 
@@ -165,7 +165,7 @@ channels:
     messages:
       SecretDeleted:
         $ref: '#/components/messages/SecretDeleted'
-    description: Published when DeleteSecretWorker removes the secret; payload retains owning `userId`.
+    description: Published when DeleteSecretWorker removes the secret; payload retains `OWNED_BY` edge target.
     x-event-flow-diagrams:
       - secret-deletion-happy
 
@@ -697,7 +697,7 @@ channels:
     messages:
       SummaryUpdated:
         $ref: '#/components/messages/SummaryUpdated'
-    description: Published when SummaryWorker updates Summary episode binding
+    description: Published when SummaryWorker updates Summary `HAS_CONTENT` edge binding
     x-event-flow-diagrams:
       - summary-update-happy
 
@@ -1897,6 +1897,9 @@ components:
         $ref: '#/components/schemas/TurnCreatedPayload'
       x-triggers:
         - Update operation status to 'completed'
+        - Establish HAS_TURN edge (Conversation → Turn)
+        - Establish CHILD_OF edge (Turn → parent Turn) if parentTurnId provided
+        - Establish HAS_ALTERNATIVE edge (Turn → Alternative) for initial alternative
         - Notify subscribers via webhooks
 
     TurnCreationFailed:
@@ -1963,6 +1966,10 @@ components:
         $ref: '#/components/schemas/AlternativeCreatedPayload'
       x-triggers:
         - Update operation status to 'completed'
+        - Establish HAS_ALTERNATIVE edge (Turn → Alternative)
+        - Establish RESPONDS_TO edge (Alternative → parent Alternative) if responding to prior turn
+        - Establish EXECUTED_BY edge (Alternative → Process) if agent turn
+        - Trigger async HAS_CONTENT edge creation (Alternative → Episode) via EpisodeIngestionWorker
         - Notify subscribers via webhooks
 
     AlternativeCreationFailed:
@@ -2030,6 +2037,11 @@ components:
         $ref: '#/components/schemas/ContextCompressedPayload'
       x-triggers:
         - Update operation status to 'completed'
+        - Establish HAS_SUMMARY edge (Conversation → Summary)
+        - Establish SUMMARIZES edges (Summary → source Episodes)
+        - Establish HAS_CONTENT edge (Summary → Episode) for summary content
+        - Establish COVERS_UP_TO edge (Summary → boundary Turn)
+        - Establish CREATED_BY_PROCESS edge (Summary → compression Process)
         - Notify subscribers via webhooks
 
     ContextCompressionFailed:
@@ -5046,12 +5058,12 @@ components:
 
     BR-SECRET-002A:
       enforced-at: API validation
-      enforced-by: SecretCreationRequested user scoping (userId immutable and set from auth)
+      enforced-by: SecretCreationRequested user scoping (`OWNED_BY` edge target immutable, derived from auth)
       failure-event: SecretCreationFailed with code=USER_SCOPE_MISMATCH
 
     BR-SECRET-002B:
       enforced-at: Worker execution validation
-      enforced-by: ProcessExecutionWorker Tool invocation guard (secretId/userId alignment)
+      enforced-by: ProcessExecutionWorker Tool invocation guard (`OWNED_BY` edge alignment between Secret, Tool, and Conversation)
       failure-event: Execution request rejected with code=SECRET_OWNERSHIP_VIOLATION (no cross-tenant event published)
 
     BR-SECRET-003:
