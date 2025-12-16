@@ -34,7 +34,7 @@ Business rules are organized by domain concept and numbered for traceability. Ea
 **Enforcement:** API
 
 **Category:** Invariant  
-**Description:** Services with `requiresSecret=true` establish that ALL Tools using this Service MUST provide valid `secretId` in their `connectionParams`.
+**Description:** Services with `requiresSecret=true` establish that ALL Tools using this Service MUST create valid `USES_SECRET` edges (credentials supplied via vault, not stored in `connectionParams`).
 
 **Rationale:** Service-level secret requirement enforces security policy at the template level.
 
@@ -63,7 +63,7 @@ Business rules are organized by domain concept and numbered for traceability. Ea
 
 **Category:** Constraint  
 **Description:** A Service CANNOT be deleted if:
-- Any Tool has `serviceId` referencing it
+- Any Tool has `USES_SERVICE` edge to it
 - Service is referenced in active Process execution context
 
 **Rationale:** Prevents orphaning Tools and breaking active workflows.
@@ -106,7 +106,7 @@ Business rules are organized by domain concept and numbered for traceability. Ea
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** ServiceTemplate, ToolTemplate, Service, Tool, and Secret default to `shared=false`. Only the owner (`ownerId`) can view/use/modify a private entity. Initial creation sets visibility; future toggles must respect dependency checks.
+**Description:** ServiceTemplate, ToolTemplate, Service, Tool, and Secret default to `shared=false`. Only the owner (via `OWNED_BY` edge) can view/use/modify a private entity. Initial creation sets visibility; future toggles must respect dependency checks.
 
 **Rationale:** Privacy by default; no accidental exposure.
 
@@ -130,7 +130,7 @@ Business rules are organized by domain concept and numbered for traceability. Ea
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** User U can view entity E if `(E.ownerId == U.userId) OR (E.shared == true)`. User U can modify/delete E only if `E.ownerId == U.userId`.
+**Description:** User U can view entity E if (E’s `OWNED_BY` edge targets U) OR (E.shared == true). User U can modify/delete E only if E’s `OWNED_BY` edge targets U.
 
 **Rationale:** Clear, consistent access semantics across all five entity types.
 
@@ -173,8 +173,8 @@ ServiceTemplate and ToolTemplate archival/deletion is NOT blocked by instance re
 
 **Category:** Validation  
 **Description:** Cross-owner references require sharing:
-- If `Tool.ownerId != Service.ownerId`, then `Service.shared` MUST be true.
-- If `Service.ownerId != Tool.ownerId` referencing it, then `Tool.shared` MUST be true when referenced back across ownership.
+- If Tool and Service have different `OWNED_BY` targets, then `Service.shared` MUST be true.
+- If Service and Tool owners differ when referenced back across ownership, then `Tool.shared` MUST be true.
 - Violations return 422 Business Rule Violation.
 
 **Rationale:** Ensures mutual consent for cross-user reuse.
@@ -187,7 +187,7 @@ ServiceTemplate and ToolTemplate archival/deletion is NOT blocked by instance re
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Secrets remain owner-scoped and cannot be used cross-user. If Service.ownerId != Secret.ownerId, creation/update fails; execution must halt with 403/422 semantics. Secret.shared does not grant cross-user access.
+**Description:** Secrets remain owner-scoped and cannot be used cross-user. If Service and Secret have different `OWNED_BY` targets, creation/update fails; execution must halt with 403/422 semantics. Secret.shared does not grant cross-user access.
 
 **Rationale:** Credentials must never cross tenant boundaries.
 
@@ -199,11 +199,11 @@ ServiceTemplate and ToolTemplate archival/deletion is NOT blocked by instance re
 **Enforcement:** Worker
 
 **Category:** Validation  
-**Description:** On execution of Tool within Conversation:
-- If `Conversation.userId != Tool.ownerId`, require `Tool.shared=true` or reject (404/403 per API policy).
-- If `Tool.ownerId != Service.ownerId`, require `Service.shared=true` or reject (422).
-- Service → Secret must satisfy `Secret.ownerId == Service.ownerId`; otherwise reject (403/422).
-- Audit captures executor.userId and resource owners.
+**Description:** On execution of Tool within a Conversation, validate the ownership chain via edges:
+- Conversation and Tool must share the same `OWNED_BY` target or Tool must be `shared=true`; otherwise reject (404/403 per API policy).
+- Tool must have `USES_SERVICE` edge to a Service whose `OWNED_BY` target matches the Tool owner, or Service must be `shared=true`; otherwise reject (422).
+- Service must have `USES_SECRET` edge to a Secret whose `OWNED_BY` target matches the Service owner; otherwise reject (403/422). Secret sharing never grants cross-user access.
+- Audit captures executor user and resource owners.
 
 **Rationale:** Enforces ownership alignment at runtime.
 
@@ -267,7 +267,7 @@ Owner controls resources and spending. System warns, documents, and fails gracef
 **Enforcement:** Worker
 
 **Category:** Invariant  
-**Description:** All cross-user resource usage is logged with executor.userId, resource.ownerId, resource.id, and timestamp for attribution and review.
+**Description:** All cross-user resource usage is logged with executor user, resource `OWNED_BY` target, resource id, and timestamp for attribution and review.
 
 **Rationale:** Enables accountability and cost tracking.
 
@@ -437,8 +437,8 @@ N/A
 **Category:** Invariant  
 **Description:** 
 - Once `encryptedValue` is written, it can only be replaced via rotation (creating new `encryptedValue` with new `updatedAt`), never decrypted or exposed in logs/responses.
-- `userId` is immutable and establishes ownership within multi-tenant system.
-- Secret belongs exclusively to its owner; cross-user access prohibited.
+- `OWNED_BY` edge target is immutable and establishes ownership within multi-tenant system.
+- Secret belongs exclusively to its `OWNED_BY` target; cross-user access prohibited.
 
 **Rationale:** Secrets are write-only from application perspective; user ownership prevents cross-tenant credential leakage; protects against credential exposure.
 
@@ -450,7 +450,7 @@ N/A
 **Enforcement:** API
 
 **Category:** Constraint  
-**Description:** A Secret CANNOT be deleted if any Tool currently has secretId in connectionParams referencing it.
+**Description:** A Secret CANNOT be deleted if any Tool currently has a `USES_SECRET` edge to it.
 
 **Rationale:** Prevents breaking active service connections.
 
@@ -462,10 +462,10 @@ N/A
 **Enforcement:** API
 
 **Category:** Invariant  
-**Description:** Every Secret MUST have explicit `userId` owner set at creation:
-- Secret created by user → `userId` set to that user
-- `userId` immutable after creation
-- All Tools referencing this Secret must belong to Conversation(s) owned by same userId
+**Description:** Every Secret MUST have an `OWNED_BY` edge to its creating User set at creation and never changed:
+- Secret created by user → establish `OWNED_BY` edge to that user
+- Ownership is immutable
+- All Tools referencing this Secret must belong to Conversations with the same `OWNED_BY` target
 - Cross-user Secret access is prohibited (API returns 404 to non-owner)
 
 **Rationale:** Multi-tenant isolation; prevents users accessing each other's credentials.
@@ -478,15 +478,15 @@ N/A
 **Enforcement:** API
 
 **Category:** Validation  
-**Description:** When ProcessStep references a Tool with `secretId` in connectionParams:
-- Tool's referenced Service must exist and belong to user's workspace
-- Secret must have `userId` matching Tool's owning user
-- At execution time, verify Conversation belongs to same userId
-- Cross-user credentials rejected with 403 Forbidden
+**Description:** When a ProcessStep `CALLS_TOOL` edge targets a Tool that `USES_SECRET`:
+- Tool's `USES_SERVICE` edge must target an existing Service in the user's workspace.
+- Secret's `OWNED_BY` target must match the Tool's `OWNED_BY` target.
+- At execution time, the Conversation's `OWNED_BY` target must match the Tool's `OWNED_BY` target.
+- Cross-user credentials are rejected with 403 Forbidden.
 
 **Shared Tool + Secret Implications:**
 When Tool is shared (shared=true) and requires Secret (requiresSecret=true):
-- Secret.userId = Tool.ownerId (tool owner's Secret)
+- Secret `OWNED_BY` target = Tool `OWNED_BY` target (tool owner's Secret)
 - Tool owner pays token costs when shared Tool is executed by others
 - Shared infrastructure costs remain with Secret owner
 - Share carefully - sharing Tool with Secret delegates payment responsibility
@@ -517,24 +517,24 @@ When Tool is shared (shared=true) and requires Secret (requiresSecret=true):
 
 **Scenario A: Tool references another user's Service**
 1. Verify Service exists; else 404.
-2. Authorize visibility: owner OR `Service.shared=true`; else 404.
-3. Set Tool.ownerId = authenticated user.
-4. If Tool.ownerId != Service.ownerId, require `Service.shared=true`; else 422 (BR-SHARE-005).
-5. Create Tool.
+2. Authorize visibility: requester is Service `OWNED_BY` target OR `Service.shared=true`; else 404.
+3. Create Tool with `OWNED_BY` edge to requester and `USES_SERVICE` edge to the Service.
+4. If Tool `OWNED_BY` target differs from Service `OWNED_BY` target, require `Service.shared=true`; else 422 (BR-SHARE-005).
+5. Persist Tool.
 
 **Scenario B: Execution with private Tool**
-1. Conversation.userId = executor.
-2. Tool.ownerId may differ.
-3. If executor != Tool.ownerId and `Tool.shared=false`, reject (403 or 404 per access policy) referencing BR-SHARE-007.
+1. Conversation `OWNED_BY` target = executor.
+2. Tool `OWNED_BY` target may differ.
+3. If executor differs from Tool `OWNED_BY` target and `Tool.shared=false`, reject (403 or 404 per access policy) referencing BR-SHARE-007.
 
 **Scenario C: Service uses foreign Secret**
-1. Service.ownerId = authenticated user.
-2. Secret.ownerId must equal Service.ownerId; else reject 422 (BR-SHARE-006) before persistence.
+1. Service `OWNED_BY` target = authenticated user.
+2. Secret `OWNED_BY` target must equal Service `OWNED_BY` target for `USES_SECRET` edge; else reject 422 (BR-SHARE-006) before persistence.
 
 **Scenario D: Execution ownership chain**
-1. Conversation.userId → Tool.ownerId: require `Tool.shared=true` if different.
-2. Tool.ownerId → Service.ownerId: require `Service.shared=true` if different.
-3. Service.ownerId → Secret.ownerId: must match exactly; otherwise reject (403/422).
+1. Conversation `OWNED_BY` → Tool `OWNED_BY`: require `Tool.shared=true` if different.
+2. Tool `OWNED_BY` → Service `OWNED_BY`: require `Service.shared=true` if different.
+3. Service `OWNED_BY` → Secret `OWNED_BY`: must match exactly; otherwise reject (403/422).
 4. Audit executor and resource owners (BR-SHARE-007, BR-SHARE-009).
 
 ---
@@ -549,7 +549,7 @@ When Tool is shared (shared=true) and requires Secret (requiresSecret=true):
 - All required properties present
 - Property types match schema
 - Values within defined constraints (min/max, format, enum)
-- If Service `requiresSecret=true`, `secretId` must be provided and valid
+- If Service `requiresSecret=true`, Tool MUST have a `USES_SECRET` edge to a valid Secret (credentials remain in vault; connectionParams supply non-secret fields)
 
 **Rationale:** Ensures Tools provide valid, type-safe connection configuration.
 
@@ -590,7 +590,7 @@ When Tool is shared (shared=true) and requires Secret (requiresSecret=true):
 
 **Category:** Constraint  
 **Description:** A Tool CANNOT be deleted if:
-- Any ProcessStep has `toolId` referencing it
+- Any ProcessStep has `CALLS_TOOL` edge to it
 - Tool is referenced in active Process execution context
 
 **Rationale:** Prevents orphaning ProcessSteps and breaking workflows.
@@ -696,7 +696,7 @@ Tools MAY execute with Tool or Service `status='degraded'` but MUST log warnings
 **Enforcement:** API
 
 **Category:** Invariant  
-**Description:** ProcessStep `dependsOn` relationships CANNOT form cycles within a Process. The dependency graph must be a directed acyclic graph (DAG).
+**Description:** ProcessStep `DEPENDS_ON` edges CANNOT form cycles within a Process. The dependency graph must be a directed acyclic graph (DAG).
 
 **Rationale:** Cyclic dependencies cause deadlocks during execution.
 
@@ -708,7 +708,7 @@ Tools MAY execute with Tool or Service `status='degraded'` but MUST log warnings
 **Enforcement:** API
 
 **Category:** Invariant  
-**Description:** A ProcessStep CANNOT depend on steps defined later in the Process step array. `dependsOn` must reference steps that appear earlier.
+**Description:** A ProcessStep CANNOT depend on steps defined later in the Process step array. `DEPENDS_ON` edges must target steps that appear earlier.
 
 **Rationale:** Ensures execution order is deterministic and parseable.
 
@@ -776,7 +776,7 @@ Tools MAY execute with Tool or Service `status='degraded'` but MUST log warnings
 
 **Category:** Constraint  
 **Description:** A Process CANNOT be deleted if:
-- Any Conversation has `processId` referencing it
+- Any Conversation has `DEFAULT_PROCESS` edge to it
 - Process is referenced in active execution context
 
 **Rationale:** Prevents orphaning Conversations and breaking active workflows.
@@ -804,7 +804,7 @@ Tools MAY execute with Tool or Service `status='degraded'` but MUST log warnings
 **Applies To:** Process
 
 **Rule:**
-Process.ownerId set from authenticated user context during creation. Immutable after creation. Process owned by creating user.
+Process establishes an `OWNED_BY` edge from authenticated user context during creation. Immutable after creation. Process owned by creating user.
 
 **Determines access control:**
 - Only owner can update/delete Process
@@ -812,9 +812,9 @@ Process.ownerId set from authenticated user context during creation. Immutable a
 - Determines which Tools Process may reference (via BR-PROCESS-011)
 
 **Validation:**
-- POST /processes: ownerId = authenticated user ID from token
-- PUT/DELETE /processes/{id}: ownerId must match authenticated user
-- Process execution: ownerId must match executor user ID
+- POST /processes: set `OWNED_BY` target = authenticated user ID from token
+- PUT/DELETE /processes/{id}: `OWNED_BY` target must match authenticated user
+- Process execution: `OWNED_BY` target must match executor user ID
 
 **Violation Impact:**
 403 Forbidden if user attempts to modify/execute Process they don't own.
@@ -829,7 +829,7 @@ Process.ownerId set from authenticated user context during creation. Immutable a
 
 **Rule:**
 ProcessSteps may only reference Tools where:
-- Tool.ownerId = Process.ownerId (own Tool), OR
+- Tool `OWNED_BY` target = Process `OWNED_BY` target (own Tool), OR
 - Tool.shared = true (shared Tool accessible to Process owner)
 
 **Validation Timing:**
@@ -841,9 +841,9 @@ ProcessSteps may only reference Tools where:
 Process owner must have access to all Tools at construction time. Runtime check handles sharing revocation scenario.
 
 **Validation:**
-For each ProcessStep.toolId:
+For each ProcessStep `CALLS_TOOL` edge:
 1. Resolve Tool entity
-2. Check: Tool.ownerId = Process.ownerId OR Tool.shared = true
+2. Check: Tool `OWNED_BY` target = Process `OWNED_BY` target OR Tool.shared = true
 3. If false: Reject with 422 "Step [N] references inaccessible Tool [name]"
 
 **Violation Impact:**
@@ -858,9 +858,9 @@ For each ProcessStep.toolId:
 
 **Category:** Validation  
 **Description:** ProcessStep `inputs` map MUST conform to its target execution requirements:
-- If `toolId` specified: Provide values for all required Tool `inputSchema` properties, match declared types (after interpolation), and avoid extra properties
-- If `processId` specified: Provide values for all required Process `initialContext` variables, match declared types (after interpolation), and avoid extra variables
-- Exactly one of `toolId` or `processId` MUST be specified
+- If `CALLS_TOOL` edge specified: Provide values for all required Tool `inputSchema` properties, match declared types (after interpolation), and avoid extra properties
+- If `CALLS_PROCESS` edge specified: Provide values for all required Process `initialContext` variables, match declared types (after interpolation), and avoid extra variables
+- Exactly one of `CALLS_TOOL` or `CALLS_PROCESS` MUST be specified
 
 **Rationale:** Steps invoke either Tools (leaf operations) or Processes (recursive orchestration). Strong validation prevents ambiguous targets and ensures correct parameter passing.
 
@@ -947,8 +947,8 @@ For each ProcessStep.toolId:
 
 **Category:** Invariant  
 **Description:** ProcessStep MUST specify exactly one execution target:
-- `toolId` for invoking Tools (leaf operations)
-- `processId` for invoking Processes (recursive orchestration)
+- `CALLS_TOOL` edge for invoking Tools (leaf operations)
+- `CALLS_PROCESS` edge for invoking Processes (recursive orchestration)
 - Cannot specify both
 - Cannot specify neither
 
@@ -962,7 +962,7 @@ For each ProcessStep.toolId:
 **Enforcement:** Worker
 
 **Category:** Constraint  
-**Description:** When ProcessStep invokes a Process via `processId`:
+**Description:** When ProcessStep invokes a Process via `CALLS_PROCESS` edge:
 - Invocation counts toward Process `maxRecursionDepth` (default 3, max 10)
 - Depth tracked across entire execution stack (Process A → B → C)
 - Exceeding depth limit terminates execution with clear error referencing call stack
@@ -979,12 +979,12 @@ For each ProcessStep.toolId:
 **Enforcement:** API
 
 **Category:** Validation  
-**Description:** Conversation `processId` (UI hint for preferred Process) MUST:
-- Reference an enabled Process when present
-- May be null for new conversations until user selects a Process
+**Description:** Conversation `DEFAULT_PROCESS` edge (UI hint for preferred Process) MUST:
+- Target an enabled Process when present
+- May be absent for new conversations until user selects a Process
 - Update idempotently when user creates an agent turn with a different Process
 
-**Rationale:** processId exists to pre-populate the UI selector, not to drive execution. Keeping it aligned with enabled Processes prevents invalid defaults.
+**Rationale:** `DEFAULT_PROCESS` exists to pre-populate the UI selector, not to drive execution. Keeping it aligned with enabled Processes prevents invalid defaults.
 
 **Violation Impact:** UI defaults to unavailable Processes; user must reconfigure every turn.
 
@@ -995,9 +995,9 @@ For each ProcessStep.toolId:
 
 **Category:** Process  
 **Description:** When the user creates a new agent turn:
-- System updates `conversation.processId` to the Process selected for that turn
+- System updates the Conversation’s `DEFAULT_PROCESS` edge to the Process selected for that turn
 - Update occurs atomically with alternative creation
-- Existing alternatives retain their own immutable `alternative.processId`
+- Existing alternatives retain their own immutable `EXECUTED_BY` edge targets
 
 **Rationale:** Remembers the user’s latest Process preference so subsequent turns default accordingly.
 
@@ -1009,12 +1009,12 @@ For each ProcessStep.toolId:
 **Enforcement:** Worker
 
 **Category:** Invariant  
-**Description:** Process execution MUST use `alternative.processId`, never `conversation.processId`:
+**Description:** Process execution MUST follow each Alternative’s `EXECUTED_BY` edge, never the Conversation’s `DEFAULT_PROCESS` edge:
 - Regenerations run the Process recorded on the alternative being regenerated
-- New alternatives capture the Process the user selected at creation
-- Conversation.processId is read only for UI defaulting; execution ignores it
+- New alternatives capture the Process the user selected at creation via `EXECUTED_BY`
+- `DEFAULT_PROCESS` is read only for UI defaulting; execution ignores it
 
-**Rationale:** Alternative.processId provides immutable audit trail and reproducibility. Conversation.processId may have changed since the alternative was created.
+**Rationale:** `EXECUTED_BY` edges provide immutable audit trail and reproducibility. `DEFAULT_PROCESS` may have changed since the alternative was created.
 
 **Violation Impact:** Responses regenerate with wrong Process; audit trail becomes unreliable.
 
@@ -1024,7 +1024,7 @@ For each ProcessStep.toolId:
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Every Conversation MUST have exactly one `userId` owner, set at creation and never changed.
+**Description:** Every Conversation MUST have exactly one `OWNED_BY` edge to a User, set at creation and never changed.
 
 **Rationale:** Establishes clear data ownership and access control.
 
@@ -1036,11 +1036,11 @@ For each ProcessStep.toolId:
 **Enforcement:** API
 
 **Category:** Invariant  
-**Description:** If Conversation has `parentConversationId`:
+**Description:** If Conversation has a `FORKED_FROM` edge:
 - Parent Conversation MUST exist
-- `forkOriginTurnId` MUST reference a Turn in parent Conversation
-- `forkOriginAlternativeId` MUST reference a valid alternative within that Turn
-- Fork relationship is immutable (parentConversationId, forkOriginTurnId, forkOriginAlternativeId)
+- `originTurn` on the edge MUST reference a Turn in the parent Conversation
+- `originAlternative` on the edge MUST reference a valid Alternative within that Turn
+- Fork relationship is immutable (edge target, originTurn, originAlternative)
 
 **Rationale:** Maintains conversation tree integrity; enables navigation and context sharing. Recording the specific alternative enables precise reconstruction of the fork point context.
 
@@ -1052,7 +1052,7 @@ For each ProcessStep.toolId:
 **Enforcement:** Worker
 
 **Category:** Process  
-**Description:** Conversation `activeEntities` array MUST stay synchronized with Entities having recent activity:
+**Description:** Conversation `HAS_ACTIVE_ENTITY` edges MUST stay synchronized with Entities having recent activity:
 - Entities extracted from recent Episodes (configurable, default 10, updates asyncronously as past Entities are enriched.)
 - Entities manually created or pinned by user
 - Updated atomically with each new Turn
@@ -1108,7 +1108,7 @@ For each ProcessStep.toolId:
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Every ConversationTurn MUST belong to exactly one Conversation via `conversationId`.
+**Description:** Every ConversationTurn MUST belong to exactly one Conversation via a `HAS_TURN` edge (with `sequence` on the edge).
 
 **Rationale:** Establishes clear containment relationship.
 
@@ -1120,10 +1120,10 @@ For each ProcessStep.toolId:
 **Enforcement:** API
 
 **Category:** Validation  
-**Description:** If ConversationTurn has `parentTurnId`:
-- Referenced Turn MUST exist and belong to same Conversation
-- Parent Turn MUST have earlier `sequence` number
-- Null `parentTurnId` ONLY allowed for first Turn in Conversation
+**Description:** If a ConversationTurn has a `CHILD_OF` edge:
+- Referenced parent Turn MUST exist and belong to the same Conversation
+- `viaAlternative` on the edge MUST identify the Alternative in the parent Turn that this Turn responds to
+- Root Turn has no `CHILD_OF` edge (only first Turn per Conversation)
 
 **Rationale:** Maintains conversation tree structure integrity.
 
@@ -1135,10 +1135,10 @@ For each ProcessStep.toolId:
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** ConversationTurn `sequence` numbers:
+**Description:** `HAS_TURN.sequence` values:
 - MUST be non-negative integers
-- MUST equal parent.sequence + 1 (or 1 if parentTurnId is null for root Turn)
-- Siblings (Turns sharing same parentTurnId) will naturally have identical sequence numbers
+- MUST equal parent sequence + 1 (or 1 for root Turn)
+- Siblings (Turns sharing the same parent Turn) naturally share identical sequence numbers
 - Sequence provides depth-in-tree ordering, not global conversation ordering
 
 **Rationale:** Provides deterministic path ordering; sequence represents position along any traversal from root to leaf.
@@ -1166,10 +1166,10 @@ For each ProcessStep.toolId:
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Every ConversationTurn alternative MUST have valid `episodeId` referencing a Graphiti Episode with:
-- Matching `group_id` (corresponds to `conversationId`)
-- Matching content type for the alternative speaker
-- Valid timestamp relationship (Episode.created_at == alternative.createdAt)
+**Description:** Every Alternative MUST have a `HAS_CONTENT` edge to a Graphiti Episode with:
+- Matching `group_id` (corresponds to the Conversation)
+- Matching content type for the Alternative speaker
+- Valid timestamp relationship (Episode.created_at == Alternative.createdAt)
 
 **Rationale:** Ties each alternative to concrete, searchable content.
 
@@ -1181,12 +1181,12 @@ For each ProcessStep.toolId:
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Every alternative MUST capture immutable process provenance:
-- User alternatives have `processId = null` (user input)
-- Agent alternatives record the Process selected at creation; value never changes
-- System alternatives reference the summarization/introspection Process
+**Description:** Every Alternative MUST capture immutable process provenance via `EXECUTED_BY` edge:
+- User Alternatives omit `EXECUTED_BY` (user input)
+- Agent Alternatives record the Process selected at creation; edge target never changes
+- System Alternatives target the summarization/introspection Process
 
-Alternative.processId is the execution source of truth. Conversation.processId is a mutable hint and may differ.
+`EXECUTED_BY` edges are the execution source of truth. `DEFAULT_PROCESS` on Conversation is a mutable hint and may differ.
 
 **Rationale:** Guarantees replayability, auditability, and analytics accuracy.
 
@@ -1199,9 +1199,9 @@ Alternative.processId is the execution source of truth. Conversation.processId i
 
 **Category:** Invariant  
 **Description:** Each ConversationTurn MUST have:
-- At least one entry in `alternatives`
-- Exactly one alternative with `isActive=true`
-- All alternative IDs unique within the Turn
+- At least one `HAS_ALTERNATIVE` edge
+- Exactly one `HAS_ALTERNATIVE.isActive=true`
+- All Alternative IDs unique within the Turn
 
 **Rationale:** Ensures deterministic display and path assembly.
 
@@ -1213,11 +1213,11 @@ Alternative.processId is the execution source of truth. Conversation.processId i
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Each alternative MUST carry valid input context:
-- If Turn has `parentTurnId` (non-root), `inputContext.parentAlternativeId` MUST reference a valid alternative in that parent Turn.
-- If Turn is root (`parentTurnId=null`), `inputContext.parentAlternativeId` MUST be null.
+**Description:** Each Alternative MUST carry valid input context:
+- If Turn has a `CHILD_OF` edge, the Alternative MUST have a `RESPONDS_TO` edge targeting a valid Alternative in the parent Turn.
+- If Turn has no `CHILD_OF` edge (root), the Alternative MUST NOT have a `RESPONDS_TO` edge.
 
-**Rationale:** Identifies which parent alternative was responded to while Turn.parentTurnId remains the single source of truth for structural parentage.
+**Rationale:** Identifies which parent Alternative was responded to while `CHILD_OF` remains the single source of truth for structural parentage.
 
 **Violation Impact:** Cannot determine which parent alternative produced the input; provenance and cache logic break.
 
@@ -1227,11 +1227,11 @@ Alternative.processId is the execution source of truth. Conversation.processId i
 **Enforcement:** Domain
 
 **Category:** Validation  
-**Description:** Every alternative MUST include:
-- Valid `episodeId`
+**Description:** Every Alternative MUST include:
+- Valid `HAS_CONTENT` edge to Graphiti Episode
 - `createdAt` timestamp
-- For agent alternatives: enabled `processId`
-- For user alternatives: `processId=null`
+- For agent Alternatives: enabled Process referenced via `EXECUTED_BY`
+- For user Alternatives: no `EXECUTED_BY` edge
 
 **Rationale:** Guarantees alternatives are auditable artifacts.
 
@@ -1244,9 +1244,9 @@ Alternative.processId is the execution source of truth. Conversation.processId i
 
 **Category:** Process  
 **Description:** When the user selects a different alternative in the UI:
-- Previous active alternative’s `isActive` is set to `false`
-- Newly selected alternative’s `isActive` is set to `true`
-- System recomputes child Turn cache status by comparing each child alternative’s `inputContext.parentAlternativeId` to the new active alternative
+- Previous active Alternative’s `HAS_ALTERNATIVE.isActive` is set to `false`
+- Newly selected Alternative’s `HAS_ALTERNATIVE.isActive` is set to `true`
+- System recomputes child Turn cache status by comparing each child Alternative’s `RESPONDS_TO` target to the new active Alternative
 
 **Rationale:** `isActive` mirrors on-screen selection. Cache indicators update to reflect whether descendants match what the user now sees.
 
@@ -1260,7 +1260,7 @@ Alternative.processId is the execution source of truth. Conversation.processId i
 **Category:** Process  
 **Description:** When user edits content:
 - Create new alternative with new Episode
-- Append to Turn’s `alternatives`
+- Create `HAS_ALTERNATIVE` edge from Turn to new Alternative
 - If `makeActive=true`, switch active alternative atomically
 - Preserve previous alternatives (no deletion)
 
@@ -1279,7 +1279,7 @@ Alternative.processId is the execution source of truth. Conversation.processId i
 - Regenerates using same Process
 - Continues from different parent alternative
 
-Each alternative records `processId` and `createdAt`.
+Each agent alternative establishes `EXECUTED_BY` edge to Process and records `createdAt`.
 
 **Rationale:** Supports Process comparison and regeneration workflows.
 
@@ -1295,14 +1295,14 @@ Each alternative records `processId` and `createdAt`.
 ```typescript
 if (turn.speaker === 'user') {
   cacheStatus = 'valid';
-} else if (alternative.episodeId === null) {
+} else if (!hasContentEdge(alternative)) {
   cacheStatus = 'generating';
-} else if (!turn.parentTurnId) {
+} else if (!turnHasChildOfEdge(turn)) {
   cacheStatus = 'valid';  // Root alternatives have no parent to compare
 } else {
-  const parentTurn = getTurn(turn.parentTurnId);
-  const parentActive = parentTurn?.alternatives.find(a => a.isActive)?.id;
-  cacheStatus = alternative.inputContext.parentAlternativeId === parentActive
+  const parentTurn = getParentViaChildOf(turn);
+  const parentActive = getActiveAlternativeViaHasAlternative(parentTurn);
+  cacheStatus = respondsToTarget(alternative) === parentActive?.id
     ? 'valid'
     : 'stale';
 }
@@ -1576,11 +1576,18 @@ Where `immediatePath` only contains Episodes from active alternatives along the 
 - **Created:** Worker compression process OR admin manual override (POST)
 - **Updated:** Content editable via PUT for emergency repair
 - **Deleted:** Deletable via DELETE; may trigger recompression consideration
-- **Immutable Fields:** `id`, `conversationId`, `episodeId` (original), `priorTurnId`, `createdAt`, `createdBy`
+- **Immutable Fields:** `id`, `compressionLevel`, `createdAt`
+
+**Immutable Edge Targets:**
+- `HAS_CONTENT` → Episode (admin repair creates new edge; original preserved)
+- `SUMMARIZES` → Episode set (source Episodes)
+- `COVERS_UP_TO` → Turn (compression boundary)
+- `CREATED_BY_PROCESS` → Process (provenance)
+- Incoming `HAS_SUMMARY` from Conversation (membership)
 
 **Update Semantics:**
 - PUT does NOT modify Episode content directly
-- PUT replaces `episodeId` pointer to NEW Episode containing corrected content
+- PUT creates new `HAS_CONTENT` edge to corrected Episode; original edge preserved for audit
 - Original Episode remains in Graphiti for audit trail
 
 **Deletion Semantics:**
@@ -1597,7 +1604,7 @@ Where `immediatePath` only contains Episodes from active alternatives along the 
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Summary MUST reference at least one source Episode via `sourceEpisodeIds`, and all source Episodes MUST:
+**Description:** Summary MUST have at least one `SUMMARIZES` edge to source Episodes, and all source Episodes MUST:
 - Belong to same user as Summary (matching group_id)
 - Have `compressionLevel` less than this Summary's `compressionLevel`
 
@@ -1627,9 +1634,9 @@ Where original Episodes have `compressionLevel = 0`.
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Summary `episodeId` MUST reference a Graphiti Episode with:
+**Description:** Summary’s `HAS_CONTENT` edge MUST target a Graphiti Episode with:
 - `source='summary'`
-- `group_id` matching Summary `userId` (same as source Episodes)
+- `group_id` matching Summary owner (same as source Episodes)
 - Content representing compressed version of source Episodes
 
 **Rationale:** Ensures summaries are searchable and retrievable like other Episodes.
@@ -1642,7 +1649,7 @@ Where original Episodes have `compressionLevel = 0`.
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Summary `createdBy` MUST record the `processId` that performed compression.
+**Description:** Summary’s `CREATED_BY_PROCESS` edge MUST target the Process that performed compression.
 
 **Rationale:** Process definitions capture compression workflows; internal Tool usage is an implementation detail.
 
@@ -1710,7 +1717,13 @@ Where original Episodes have `compressionLevel = 0`.
 - **Created:** Introspection worker process OR user manual injection (POST)
 - **Updated:** Content editable via PUT for persona correction
 - **Deleted:** Deletable via DELETE; triggers carousel rebalancing
-- **Immutable Fields:** `id`, `userId`, `position`, `createdAt`, `createdBy`
+- **Immutable Fields:** `id`, `carouselPosition`, `createdAt`
+
+**Immutable Edge Targets:**
+- `HAS_CONTENT` → Episode (correction creates new edge; original preserved)
+
+**Derived (not stored as edge):**
+- User scope via Episode.group_id = userId
 
 **Carousel Rules:**
 - Positions 0-9 available per user (user-scoped via `group_id = userId`)
@@ -1719,7 +1732,7 @@ Where original Episodes have `compressionLevel = 0`.
 
 **Update Semantics:**
 - PUT does NOT modify Episode content directly
-- PUT replaces `episodeId` pointer to NEW Episode containing corrected content
+- PUT creates new `HAS_CONTENT` edge to corrected Episode; original edge preserved for audit
 - Original Episode remains in Graphiti for audit trail
 
 **User Creation (POST):**
@@ -1797,7 +1810,7 @@ Where original Episodes have `compressionLevel = 0`.
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Introspection `episodeId` MUST reference a Graphiti Episode with:
+**Description:** Introspection's `HAS_CONTENT` edge MUST target a Graphiti Episode with:
 - `source='introspection'`
 - `group_id = userId` (introspections scoped to user, enabling agent learning across user's conversations)
 - Content representing the reflection text
@@ -2042,7 +2055,7 @@ Conversation.contextBudget >= WorkingMemory.totalTokens
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Once created, an alternative’s `id`, `episodeId`, `processId`, and `createdAt` are immutable. Only `isActive` may change, and alternatives cannot be deleted.
+**Description:** Once created, an Alternative’s `id`, `createdAt`, `HAS_CONTENT` target, and `EXECUTED_BY` target are immutable. Only `HAS_ALTERNATIVE.isActive` may change, and Alternatives cannot be deleted.
 
 **Rationale:** Preserves full history of attempts per conversation position.
 
@@ -2054,10 +2067,10 @@ Conversation.contextBudget >= WorkingMemory.totalTokens
 **Enforcement:** Worker
 
 **Category:** Invariant  
-**Description:** Each Turn MUST always have exactly one `isActive=true` alternative. Selecting an alternative triggers a three-phase cascade:
-1. **Atomic local update:** Selected alternative set `isActive=true`; previous active alternative set `isActive=false`.
-2. **Ancestor cascade:** Recursively walk up to root following each alternative’s `inputContext.parentAlternativeId`; in every ancestor Turn, activate the referenced alternative and deactivate all siblings so the active path to root is coherent.
-3. **Descendant invalidation:** Recursively walk down to leaves; for each descendant alternative whose `inputContext.parentAlternativeId` does not match the newly-active parent alternative, set `cacheStatus='stale'` (do NOT change `isActive`). Alternatives whose parent matches remain valid.
+**Description:** Each Turn MUST always have exactly one `HAS_ALTERNATIVE.isActive=true` Alternative. Selecting an Alternative triggers a three-phase cascade:
+1. **Atomic local update:** Selected Alternative’s `HAS_ALTERNATIVE.isActive=true`; previous active Alternative set to false.
+2. **Ancestor cascade:** Recursively walk up to root following `RESPONDS_TO` edges; in every ancestor Turn, activate the referenced Alternative and deactivate all siblings so the active path to root is coherent.
+3. **Descendant invalidation:** Recursively walk down to leaves; for each descendant Alternative whose `RESPONDS_TO` target does not match the newly-active parent Alternative, set `cacheStatus='stale'` (do NOT change `isActive`). Alternatives whose parent matches remain valid.
 
 **Rationale:** Guarantees a single coherent active path from root to the currently selected Turn while preserving off-path alternatives for future exploration.
 
@@ -2069,7 +2082,7 @@ Conversation.contextBudget >= WorkingMemory.totalTokens
 **Enforcement:** Domain
 
 **Category:** Invariant  
-**Description:** Each alternative’s `inputContext.parentAlternativeId` is immutable after creation.
+**Description:** Each Alternative’s `RESPONDS_TO` target is immutable after creation.
 
 **Rationale:** Locks in which parent alternative produced the input so provenance and cache status remain trustworthy.
 
@@ -2094,8 +2107,8 @@ Conversation.contextBudget >= WorkingMemory.totalTokens
 
 **Category:** Process  
 **Description:** Continuing a conversation from a Turn uses:
-- Existing child Turn if it already references the active parent alternative (its alternatives’ `inputContext.parentAlternativeId` already matches)
-- Otherwise, create a new child Turn whose first alternative records `inputContext.parentAlternativeId` equal to the currently active parent alternative
+- Existing child Turn if it already `RESPONDS_TO` the active parent Alternative
+- Otherwise, create a new child Turn whose first Alternative `RESPONDS_TO` the currently active parent Alternative
 
 Multiple child Turns may exist targeting different parent alternatives.
 
@@ -2122,8 +2135,8 @@ Multiple child Turns may exist targeting different parent alternatives.
 
 **Category:** Process  
 **Description:** Navigating the conversation tree (focusing a Turn, cycling alternatives, or jumping to ancestors/descendants) MUST trigger the BR-ALT-002 three-phase cascade across the tree:
-- **Upward:** Recursively activate required ancestor alternatives so selected Turn is connected to root via a single active path
-- **Downward:** Mark descendant alternatives `cacheStatus='stale'` if their parent alternative no longer matches; do NOT auto-switch descendant `isActive`
+- **Upward:** Recursively activate required ancestor Alternatives by following `RESPONDS_TO` edges so the selected Turn is connected to root via a single active path
+- **Downward:** Mark descendant Alternatives `cacheStatus='stale'` if their `RESPONDS_TO` target no longer matches the newly active parent Alternative; do NOT auto-switch descendant `isActive`
 - **Siblings:** No effect on sibling branches; they retain own active alternatives
 - **WorkingMemory:** After cascade completes, rebuild WorkingMemory so `immediatePath` reflects new active path
 
@@ -2160,8 +2173,8 @@ Multiple child Turns may exist targeting different parent alternatives.
 Process execution resource accounting determined by Secret ownership:
 
 **Scenario 1: Tool requires Secret (Tool.requiresSecret = true)**
-- Tool.connectionParams.secretId identifies Secret
-- Secret.userId determines execution context
+- Tool's `USES_SECRET` edge identifies Secret
+- Secret's `OWNED_BY` target determines execution context
 - Secret owner's tokens consumed
 - Secret owner's rate limits apply
 - Secret owner's API quotas decremented
@@ -2173,7 +2186,7 @@ Process execution resource accounting determined by Secret ownership:
 - Executor's API quotas decremented
 
 **Scenario 3: Shared Tool with original owner's Secret**
-- User A creates Tool (requiresSecret=true, connectionParams.secretId=SecretA)
+- User A creates Tool (requiresSecret=true, `USES_SECRET` edge to SecretA)
 - User A shares Tool (shared=true)
 - User B executes via Process
 - **User A pays** (Secret owner)
@@ -2183,7 +2196,7 @@ Process execution resource accounting determined by Secret ownership:
 Sharing Tool with Secret delegates token/quota costs to Secret owner. Share carefully.
 
 **Cross-Reference:**
-BR-SECRET-002B ensures Secret.userId aligns with Tool.ownerId or Conversation.userId, preventing cross-user Secret usage without permission.
+BR-SECRET-002B ensures Secret `OWNED_BY` aligns with Tool `OWNED_BY` or Conversation `OWNED_BY`, preventing cross-user Secret usage without permission.
 
 **Validation:**
 None at configuration time. Token consumption tracked during execution.
@@ -2205,7 +2218,7 @@ At Process execution time, validate all resource dependencies:
 **Tool Access Validation:**
 For each ProcessStep Tool reference:
 1. Tool must exist in database
-2. Tool.ownerId = executor.userId (own Tool), OR
+2. Tool `OWNED_BY` target = executor (own Tool), OR
 3. Tool.shared = true (currently shared)
 
 **Failure Scenarios (all return 422 Unprocessable Entity):**
@@ -2215,7 +2228,7 @@ For each ProcessStep Tool reference:
 
 **Secret Validation (if Tool.requiresSecret = true):**
 1. Secret must exist
-2. Secret.userId = Tool.ownerId OR Secret.userId = executor.userId
+2. Secret `OWNED_BY` target matches Tool `OWNED_BY` target OR matches executor
 3. Secret credentials must be valid (validated during API call)
 
 **Failure Scenarios:**
@@ -2359,7 +2372,7 @@ Process execution halts at failing step with 422 + detailed error message. Subse
 
 **Category:** Invariant  
 **Description:** Secrets can only be accessed by:
-- Owning user (via `userId` match) in their own Conversations/Tools
+- Owning user (Secret’s `OWNED_BY` target) in their own Conversations/Tools
 - System processes acting on user's behalf with impersonation context
 - Admin users with explicit audit logged access grant
 
@@ -2376,7 +2389,7 @@ User A cannot access User B's secrets under any circumstances.
 
 **Category:** Invariant  
 **Description:** Conversations and their data (Turns, WorkingMemory, Episodes) accessible only by:
-- Owning user (via `userId`)
+- Owning user (Conversation’s `OWNED_BY` target)
 - System processes acting on user's behalf
 - Admin users with explicit access grant
 

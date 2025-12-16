@@ -49,6 +49,9 @@ Together these concepts ensure every behavior is configured, versioned, and obse
 **Relationships**
 - `Service --OWNED_BY--> User` (`created_at`)
 
+**Edge Constraints**
+- `OWNED_BY` target: Immutable after creation. Ownership cannot transfer.
+
 **Examples**
 
 Neo4j Service connectionSchema:
@@ -108,6 +111,9 @@ LLM Provider Service connectionSchema:
 - `Tool --USES_SECRET--> Secret` (`scope`; credentials remain vaulted)
 - `Secret --OWNED_BY--> User` (`created_at`)
 
+**Edge Constraints**
+- `OWNED_BY` target: Immutable after creation. Ownership cannot transfer.
+
 **References**
 - `USES_SECRET` edges from Tools authorize access. Execution validates the Secret belongs to the same user as the Conversation.
 
@@ -151,6 +157,12 @@ LLM Provider Service connectionSchema:
 - `Tool --OWNED_BY--> User` (`created_at`)
 - `Tool --USES_SERVICE--> Service` (`connectionParams`; connection parameters carried on the edge)
 - `Tool --USES_SECRET--> Secret` (`scope`; credentials stay in vault, not the graph)
+
+**Edge Constraints**
+- `OWNED_BY` target: Immutable after creation.
+- `USES_SERVICE` target: Immutable after creation; Service binding fixed at Tool creation.
+- `USES_SERVICE.connectionParams`: Mutable; connection configuration may be updated.
+- `USES_SECRET` target: Mutable; Secret can be rotated to a new Secret node.
 
 **Example**
 
@@ -311,6 +323,9 @@ When a Tool is created from a ToolTemplate:
 - Defined via ordered `steps`; ProcessSteps connect to Tools/Processes using `CALLS_TOOL` / `CALLS_PROCESS` edges.
 - Conversations link preferred Processes via `DEFAULT_PROCESS` edges.
 
+**Edge Constraints**
+- `OWNED_BY` target: Immutable after creation. Ownership cannot transfer.
+
 **References**
 - Conversations store Process preference through `DEFAULT_PROCESS` edge.
 - ProcessSteps drive recursive execution; `CALLS_PROCESS` edges must stay within `maxRecursionDepth`.
@@ -348,6 +363,15 @@ When a Tool is created from a ToolTemplate:
 - `ProcessStep --CALLS_TOOL--> Tool` (`timeout`, `interactionMode`)
 - `ProcessStep --CALLS_PROCESS--> Process` (`timeout`)
 - `ProcessStep --DEPENDS_ON--> ProcessStep` (`order`; captures sequencing + dependency graph)
+
+**Edge Constraints**
+- `CALLS_TOOL` target: Immutable. Defined as part of Process specification.
+- `CALLS_PROCESS` target: Immutable. Defined as part of Process specification.
+- `CALLS_TOOL.timeout`, `CALLS_TOOL.interactionMode`: Immutable. Part of step definition.
+- `CALLS_PROCESS.timeout`: Immutable. Part of step definition.
+- `DEPENDS_ON` edge set: Immutable. Dependency graph fixed at Process creation.
+- `DEPENDS_ON.order`: Immutable. Execution sequencing.
+- Exactly one of `CALLS_TOOL` or `CALLS_PROCESS` must exist (cardinality constraint).
 
 **References**
 - `CALLS_TOOL` / `CALLS_PROCESS` edges identify the invocation target.
@@ -456,6 +480,14 @@ function createAgentTurn(conversationId, selectedProcessId) {
 - `Conversation --FORKED_FROM--> Conversation` (`originTurn`, `originAlternative`)
 - `Conversation --HAS_TURN--> ConversationTurn` (`sequence`)
 
+**Edge Constraints**
+- `OWNED_BY` target: Immutable after creation. Ownership cannot transfer.
+- `DEFAULT_PROCESS` target: Mutable. UI preference hint updated on each agent turn.
+- `FORKED_FROM` target: Immutable if present. Fork provenance.
+- `FORKED_FROM.originTurn`: Immutable. Fork point Turn.
+- `FORKED_FROM.originAlternative`: Immutable. Fork point Alternative.
+- `HAS_ACTIVE_ENTITY` edge set: Mutable. Updated as entities gain/lose relevance.
+
 **References**
 - `DEFAULT_PROCESS` edge records the current Process preference.
 - Alternatives link to Processes via `EXECUTED_BY` edge.
@@ -526,10 +558,23 @@ This async pattern keeps conversation UX responsive while still feeding the know
 - `Alternative --HAS_CONTENT--> Episode` (`source`, `createdAt`)
 - `Alternative --EXECUTED_BY--> Process` (`createdAt`)
 
+**Edge Constraints**
+- Incoming `HAS_TURN` from Conversation: Immutable. Turn cannot be moved between Conversations.
+- `HAS_TURN.sequence`: Immutable. Depth-in-tree position.
+- `CHILD_OF` target: Immutable after creation. Structural parent.
+- `CHILD_OF.viaAlternative`: Immutable. Records which parent Alternative was active at creation.
+
 **References**
 - `HAS_CONTENT` edges link Alternatives to Graphiti Episodes.
 - `RESPONDS_TO` edges identify which alternative in the parent Turn supplied the input.
 - `EXECUTED_BY` edges record which Process produced each Alternative.
+
+**Edge Constraints**
+- `HAS_CONTENT` target: Initially null (async Episode creation). Once set, immutable. Backfilled by ingestion worker.
+- `RESPONDS_TO` target: Immutable after creation. Locks which parent Alternative produced input.
+- `EXECUTED_BY` target: Immutable after creation. Agent Alternatives only; user Alternatives have no `EXECUTED_BY` edge.
+- `HAS_ALTERNATIVE.isActive`: Mutable. Only field that changes after Alternative creation.
+- `HAS_ALTERNATIVE.sequence`: Immutable. Order within Turn.
 
 **Notes**
 - **User alternatives:** Created when user edits their prompt. Keeps bad attempts out of context.
@@ -848,6 +893,13 @@ interface EntityTyping {
 - `Summary --CREATED_BY_PROCESS--> Process`
 - WorkingMemory consumes Summary nodes for context (computed inclusion; no stored edge)
 
+**Edge Constraints**
+- `HAS_CONTENT` target: Immutable after creation. Admin repair creates NEW edge to corrected Episode; original edge preserved for audit.
+- `SUMMARIZES` edge set: Immutable after creation. Source Episodes locked at compression time.
+- `COVERS_UP_TO` target: Immutable. Marks compression boundary.
+- `CREATED_BY_PROCESS` target: Immutable. Provenance record.
+- Incoming `HAS_SUMMARY` from Conversation: Immutable. Summary cannot be moved between Conversations.
+
 **References**
 - WorkingMemory stores Summary IDs in `summaries` array (computed from `HAS_SUMMARY` edges)
 
@@ -877,6 +929,9 @@ interface EntityTyping {
 
 **Relationships**
 - `Introspection --HAS_CONTENT--> Episode` (`source`, `createdAt`)
+
+**Edge Constraints**
+- `HAS_CONTENT` target: Immutable after creation. Admin/user correction creates NEW edge; original preserved for audit.
 
 **References**
 - Stores Graphiti Episode UUID via `HAS_CONTENT` edge

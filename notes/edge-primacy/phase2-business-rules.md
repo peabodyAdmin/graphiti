@@ -36,22 +36,22 @@
 4. Dual-write during migration (keep group_id property where already defined).
 
 ## Edits for 01-business_rules.md
-- [ ] ### Edit 2.1: BR-SHARE-001 (Ownership Validation)
+- [x] ### Edit 2.1: BR-SHARE-001 (Ownership Validation)
   - Update rule language to reference OWNED_BY edge; keep ownerId as dual-write note.
-- [ ] ### Edit 2.2: BR-SHARE-007 (Service Sharing)
+- [x] ### Edit 2.2: BR-SHARE-007 (Service Sharing)
   - Reference USES_SERVICE edge for dependency validation; remove serviceId property reliance.
-- [ ] ### Edit 2.3: BR-SECRET-002B (Secret Access)
+- [x] ### Edit 2.3: BR-SECRET-002B (Secret Access)
   - Use USES_SECRET edge + vault pattern; ownerId checks via OWNED_BY edges.
-- [ ] ### Edit 2.4: BR-CONVERSATION-* (Conversation Structure)
+- [x] ### Edit 2.4: BR-CONVERSATION-* (Conversation Structure)
   - Use HAS_TURN/CHILD_OF/FORKED_FROM edges; deprecate conversationId/parentTurnId pointers.
-- [ ] ### Edit 2.5: BR-ALTERNATIVE-* (Alternative Cascade)
+- [x] ### Edit 2.5: BR-ALTERNATIVE-* (Alternative Cascade)
   - Cascade via RESPONDS_TO edges, not inputContext.parentAlternativeId property parsing.
 
 ## Validation Checklist
-- [ ] All rules reference edges, not properties, with dual-write notes where necessary.
-- [ ] Ownership/sharing rules align to OWNED_BY/USES_SERVICE/USES_SECRET edges.
-- [ ] Cascade rules use RESPONDS_TO.
-- [ ] Edge names match reference table.
+- [x] All rules reference edges, not properties, with dual-write notes where necessary.
+- [x] Ownership/sharing rules align to OWNED_BY/USES_SERVICE/USES_SECRET edges.
+- [x] Cascade rules use RESPONDS_TO.
+- [x] Edge names match reference table.
 
 ## Cross-File Dependencies
 - Depends on: Phase 1 edge definitions.
